@@ -67,7 +67,11 @@ export const CR_Usuario_CTS = async (req, res) => {
     });
     res.json({ message: 'Usuario creado correctamente', usuario: nuevo });
   } catch (error) {
-    res.status(500).json({ mensajeError: error.message });
+    console.error('Error al crear usuario:', error);
+    res.status(500).json({
+      mensajeError: error.message,
+      detalles: error.errors || error
+    });
   }
 };
 

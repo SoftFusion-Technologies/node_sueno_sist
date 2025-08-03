@@ -45,7 +45,7 @@ const pool = mysql.createPool({
   host: 'localhost', // Configurar según tu base de datos
   user: 'root', // Configurar según tu base de datos
   password: '123456', // Configurar según tu base de datos
-  database: 'DB_GarageDESA_21062025'
+  database: 'DB_SuenoDESA_03082025'
 });
 
 // Ruta de login

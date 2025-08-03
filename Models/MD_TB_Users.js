@@ -1,10 +1,11 @@
 /*
  * Programador: Benjamin Orellana
  * Fecha Creación: 21 / 06 / 2025
- * Versión: 1.0
+ * Versión: 1.1
  *
  * Descripción:
  * Este archivo (MD_TB_Users.js) contiene la definición del modelo Sequelize para la tabla de usuarios.
+ * Incluye roles personalizados y relación con locales.
  *
  * Tema: Modelos - Usuarios
  * Capa: Backend
@@ -24,6 +25,11 @@ if (process.env.NODE_ENV !== 'production') {
 export const UserModel = db.define(
   'usuarios',
   {
+    id: {
+      type: DataTypes.INTEGER,
+      autoIncrement: true,
+      primaryKey: true
+    },
     nombre: {
       type: DataTypes.STRING(100),
       allowNull: false
@@ -31,25 +37,39 @@ export const UserModel = db.define(
     email: {
       type: DataTypes.STRING(100),
       allowNull: false,
-      unique: true
+      unique: true,
+      validate: {
+        isEmail: true
+      }
     },
     password: {
       type: DataTypes.STRING(255),
       allowNull: false
     },
     rol: {
-      type: DataTypes.ENUM('admin', 'empleado', 'vendedor'),
-      defaultValue: 'empleado'
+      type: DataTypes.ENUM('socio', 'administrativo', 'vendedor', 'contador'),
+      allowNull: false
     },
     local_id: {
       type: DataTypes.INTEGER.UNSIGNED,
-      allowNull: true
+      allowNull: true,
+      references: {
+        model: 'locales',
+        key: 'id'
+      }
+    },
+    created_at: {
+      type: DataTypes.DATE,
+      defaultValue: DataTypes.NOW
+    },
+    updated_at: {
+      type: DataTypes.DATE,
+      defaultValue: DataTypes.NOW
     }
   },
   {
-    timestamps: false,
-    createdAt: 'created_at',
-    updatedAt: 'updated_at'
+    tableName: 'usuarios',
+    timestamps: false
   }
 );
 
