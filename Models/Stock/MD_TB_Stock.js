@@ -1,16 +1,12 @@
 /*
  * Programador: Benjamin Orellana
- * Fecha Creación: 21 / 06 / 2025
- * Versión: 1.0
+ * Fecha Creación: 03 / 08 / 2025
+ * Versión: 2.0
  *
  * Descripción:
- * Este archivo (MD_TB_Stock.js) contiene la definición del modelo Sequelize para el stock de productos.
- *
- * Tema: Modelos - Stock
- * Capa: Backend
+ * Modelo Sequelize para la tabla 'stock' adaptado al sistema de "El Sueño"
  */
 
-// Importaciones
 import dotenv from 'dotenv';
 import db from '../../DataBase/db.js';
 import { DataTypes } from 'sequelize';
@@ -19,47 +15,66 @@ if (process.env.NODE_ENV !== 'production') {
   dotenv.config();
 }
 
-// Definición del modelo de la tabla 'stock'
 export const StockModel = db.define(
   'stock',
   {
     producto_id: {
       type: DataTypes.INTEGER.UNSIGNED,
-      allowNull: true
-    },
-    talle_id: {
-      type: DataTypes.INTEGER.UNSIGNED,
-      allowNull: true
+      allowNull: false,
+      references: {
+        model: 'productos',
+        key: 'id'
+      }
     },
     local_id: {
       type: DataTypes.INTEGER.UNSIGNED,
-      allowNull: true
+      allowNull: false,
+      references: {
+        model: 'locales',
+        key: 'id'
+      }
     },
     lugar_id: {
       type: DataTypes.INTEGER.UNSIGNED,
-      allowNull: true
+      allowNull: false,
+      references: {
+        model: 'lugares',
+        key: 'id'
+      }
     },
     estado_id: {
       type: DataTypes.INTEGER.UNSIGNED,
-      allowNull: true
+      allowNull: false,
+      references: {
+        model: 'estados',
+        key: 'id'
+      }
     },
     cantidad: {
       type: DataTypes.INTEGER,
       defaultValue: 0
     },
-    en_perchero: {
+    en_exhibicion: {
       type: DataTypes.BOOLEAN,
-      defaultValue: true
+      defaultValue: false
     },
-    codigo_sku: {
-      type: DataTypes.STRING(150),
+    observaciones: {
+      type: DataTypes.TEXT,
       allowNull: true
     }
   },
   {
+    tableName: 'stock',
     timestamps: true,
     createdAt: 'created_at',
-    updatedAt: 'updated_at'
+    updatedAt: 'updated_at',
+    indexes: [
+      {
+        name: 'uk_stock',
+        unique: true,
+        fields: ['producto_id', 'local_id', 'lugar_id', 'estado_id']
+      }
+    ]
   }
 );
 

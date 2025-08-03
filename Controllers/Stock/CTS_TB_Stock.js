@@ -13,7 +13,6 @@
 // Importaciones de modelos
 import MD_TB_Stock from '../../Models/Stock/MD_TB_Stock.js';
 import { ProductosModel } from '../../Models/Stock/MD_TB_Productos.js';
-import { TallesModel } from '../../Models/Stock/MD_TB_Talles.js';
 import { LocalesModel } from '../../Models/Stock/MD_TB_Locales.js';
 import { LugaresModel } from '../../Models/Stock/MD_TB_Lugares.js';
 import { EstadosModel } from '../../Models/Stock/MD_TB_Estados.js';
@@ -29,7 +28,6 @@ export const OBRS_Stock_CTS = async (req, res) => {
     const stock = await StockModel.findAll({
       include: [
         { model: ProductosModel },
-        { model: TallesModel },
         { model: LocalesModel },
         { model: LugaresModel },
         { model: EstadosModel }
@@ -47,7 +45,6 @@ export const OBR_Stock_CTS = async (req, res) => {
     const registro = await StockModel.findByPk(req.params.id, {
       include: [
         { model: ProductosModel },
-        { model: TallesModel },
         { model: LocalesModel },
         { model: LugaresModel },
         { model: EstadosModel }
@@ -108,21 +105,19 @@ export const ER_Stock_CTS = async (req, res) => {
 export const UR_Stock_CTS = async (req, res) => {
   const {
     producto_id,
-    talle_id,
     local_id,
     lugar_id,
     estado_id,
     cantidad,
-    en_perchero
+    en_exhibicion,
+    observaciones
   } = req.body;
   const id = req.params.id;
 
   try {
-    // 1. Buscá si ya existe OTRO stock con la misma combinación (menos el actual)
     const existente = await StockModel.findOne({
       where: {
         producto_id,
-        talle_id,
         local_id,
         lugar_id,
         estado_id,
@@ -131,28 +126,23 @@ export const UR_Stock_CTS = async (req, res) => {
     });
 
     if (existente) {
-      // 2. Si existe, suma las cantidades y borra el registro actual (merge)
       const nuevoStock = await existente.update({
         cantidad: existente.cantidad + Number(cantidad),
-        en_perchero: en_perchero ?? existente.en_perchero
+        en_exhibicion: en_exhibicion ?? existente.en_exhibicion
       });
       await StockModel.destroy({ where: { id } });
-      return res.json({
-        message: 'Stock fusionado con el registro existente',
-        actualizado: nuevoStock
-      });
+      return res.json({ message: 'Stock fusionado', actualizado: nuevoStock });
     }
 
-    // 3. Si no hay duplicado, updatea normal
     const [updated] = await StockModel.update(
       {
         producto_id,
-        talle_id,
         local_id,
         lugar_id,
         estado_id,
         cantidad,
-        en_perchero
+        en_exhibicion,
+        observaciones
       },
       { where: { id } }
     );
@@ -164,7 +154,6 @@ export const UR_Stock_CTS = async (req, res) => {
       res.status(404).json({ mensajeError: 'Stock no encontrado' });
     }
   } catch (error) {
-    console.error('Error en UR_Stock_CTS:', error);
     res.status(500).json({ mensajeError: error.message });
   }
 };
@@ -179,97 +168,89 @@ export const ER_StockPorProducto = async (req, res) => {
 };
 
 export const DISTRIBUIR_Stock_CTS = async (req, res) => {
-  const { producto_id, local_id, lugar_id, estado_id, en_perchero, talles } =
-    req.body;
+  const {
+    producto_id,
+    local_id,
+    lugar_id,
+    estado_id,
+    cantidad,
+    en_exhibicion = false,
+    observaciones = null
+  } = req.body;
 
-  // 1. Validación de datos requeridos
   if (
     !producto_id ||
     !local_id ||
     !lugar_id ||
     !estado_id ||
-    !Array.isArray(talles) ||
-    talles.length === 0
+    cantidad == null
   ) {
     return res.status(400).json({
-      mensajeError: 'Faltan datos obligatorios o el array de talles está vacío.'
+      mensajeError: 'Faltan datos obligatorios.'
     });
   }
 
   const transaction = await db.transaction();
   try {
-    for (const item of talles) {
-      const { talle_id, cantidad } = item;
-      if (!talle_id || cantidad == null) continue; // Saltar si algún talle está incompleto
+    const stockExistente = await StockModel.findOne({
+      where: {
+        producto_id,
+        local_id,
+        lugar_id,
+        estado_id
+      },
+      transaction
+    });
 
-      // 2. Buscar si ya existe un stock igual (evita duplicados)
-      const stockExistente = await StockModel.findOne({
-        where: {
-          producto_id,
-          talle_id,
-          local_id,
-          lugar_id,
-          estado_id
-        },
-        transaction
-      });
+    // Generar un SKU amigable o fallback con IDs
+    let codigo_sku = '';
+    try {
+      const [producto, local, lugar] = await Promise.all([
+        ProductosModel.findByPk(producto_id),
+        LocalesModel.findByPk(local_id),
+        LugaresModel.findByPk(lugar_id)
+      ]);
+      codigo_sku = `${slugify(producto?.nombre)}-${slugify(
+        local?.nombre
+      )}-${slugify(lugar?.nombre)}`;
+    } catch {
+      codigo_sku = `${producto_id}-${local_id}-${lugar_id}`;
+    }
 
-      // 3. Generar SKU robusto (si falla, usar ids)
-      let codigo_sku = '';
+    if (stockExistente) {
+      await stockExistente.update(
+        { cantidad, en_exhibicion, observaciones, codigo_sku },
+        { transaction }
+      );
+      console.log(
+        `[UPDATE] Stock actualizado: ${codigo_sku} a cantidad ${cantidad}`
+      );
+    } else {
       try {
-        const [producto, talle, local, lugar] = await Promise.all([
-          ProductosModel.findByPk(producto_id),
-          TallesModel.findByPk(talle_id),
-          LocalesModel.findByPk(local_id),
-          LugaresModel.findByPk(lugar_id)
-        ]);
-        codigo_sku = `${slugify(
-          producto?.nombre
-        )}-${talle?.nombre?.toUpperCase()}-${slugify(local?.nombre)}-${slugify(
-          lugar?.nombre
-        )}`;
-      } catch {
-        codigo_sku = `${producto_id}-${talle_id}-${local_id}-${lugar_id}`;
-      }
-
-      // 4. Si ya existe, actualiza; si no, crea uno nuevo
-      if (stockExistente) {
-        await stockExistente.update(
-          { cantidad, en_perchero, codigo_sku },
+        await StockModel.create(
+          {
+            producto_id,
+            local_id,
+            lugar_id,
+            estado_id,
+            cantidad,
+            en_exhibicion,
+            observaciones,
+            codigo_sku
+          },
           { transaction }
         );
         console.log(
-          `[UPDATE] Stock (prod:${producto_id}, talle:${talle_id}) actualizado a ${cantidad}`
+          `[CREATE] Nuevo stock creado: ${codigo_sku} con cantidad ${cantidad}`
         );
-      } else {
-        // Evita duplicado por si dos requests llegan casi juntos (race condition)
-        try {
-          await StockModel.create(
-            {
-              producto_id,
-              talle_id,
-              local_id,
-              lugar_id,
-              estado_id,
-              cantidad,
-              en_perchero,
-              codigo_sku
-            },
-            { transaction }
-          );
-          console.log(
-            `[CREATE] Stock (prod:${producto_id}, talle:${talle_id}) creado con ${cantidad}`
-          );
-        } catch (err) {
-          if (err.name === 'SequelizeUniqueConstraintError') {
-            // Duplicado justo en el momento (caso raro pero puede pasar)
-            return res.status(409).json({
-              mensajeError:
-                'Ya existe un stock para este producto, talle y ubicación. Recargá y editá el stock existente.'
-            });
-          }
-          throw err;
+      } catch (err) {
+        if (err.name === 'SequelizeUniqueConstraintError') {
+          return res.status(409).json({
+            mensajeError:
+              'Ya existe un stock para este producto y ubicación. Recargá y editá el stock existente.'
+          });
         }
+        throw err;
       }
     }
 
@@ -282,6 +263,7 @@ export const DISTRIBUIR_Stock_CTS = async (req, res) => {
   }
 };
 
+
 // Función para limpiar nombres (similar al front)
 function slugify(valor) {
   return String(valor)
@@ -293,114 +275,111 @@ function slugify(valor) {
 }
 
 export const TRANSFERIR_Stock_CTS = async (req, res) => {
-  const { grupoOriginal, nuevoGrupo, talles } = req.body;
+  const { grupoOriginal, nuevoGrupo, cantidad } = req.body;
 
-  if (
-    !grupoOriginal ||
-    !nuevoGrupo ||
-    !Array.isArray(talles) ||
-    talles.length === 0
-  ) {
+  if (!grupoOriginal || !nuevoGrupo || cantidad == null) {
     return res
       .status(400)
-      .json({ mensajeError: 'Datos incompletos para transferir stock' });
+      .json({ mensajeError: 'Datos incompletos para transferir stock.' });
   }
 
   const transaction = await db.transaction();
 
   try {
-    for (const { talle_id, cantidad } of talles) {
-      if (!talle_id || cantidad == null) continue;
+    // 1. Buscar y validar stock en grupo original
+    const stockOrigen = await StockModel.findOne({
+      where: {
+        producto_id: grupoOriginal.producto_id,
+        local_id: grupoOriginal.local_id,
+        lugar_id: grupoOriginal.lugar_id,
+        estado_id: grupoOriginal.estado_id
+      },
+      transaction
+    });
 
-      // 1. Restar stock en grupoOriginal (si existe)
-      const stockOrigen = await StockModel.findOne({
-        where: {
-          producto_id: grupoOriginal.producto_id,
-          talle_id,
-          local_id: grupoOriginal.local_id,
-          lugar_id: grupoOriginal.lugar_id,
-          estado_id: grupoOriginal.estado_id
+    if (!stockOrigen || stockOrigen.cantidad < cantidad) {
+      throw new Error('No hay suficiente stock en el grupo original.');
+    }
+
+    // Verificar ventas asociadas
+    const ventaAsociada = await DetalleVentaModel.findOne({
+      where: { stock_id: stockOrigen.id }
+    });
+    if (ventaAsociada) {
+      throw new Error(
+        'El stock original tiene ventas asociadas y no puede transferirse.'
+      );
+    }
+
+    // Restar en origen
+    const nuevaCantidadOrigen = stockOrigen.cantidad - cantidad;
+    if (nuevaCantidadOrigen <= 0) {
+      await stockOrigen.destroy({ transaction });
+    } else {
+      await stockOrigen.update(
+        { cantidad: nuevaCantidadOrigen },
+        { transaction }
+      );
+    }
+
+    // 2. Buscar o crear stock en el nuevo grupo
+    const stockDestino = await StockModel.findOne({
+      where: {
+        producto_id: nuevoGrupo.producto_id,
+        local_id: nuevoGrupo.local_id,
+        lugar_id: nuevoGrupo.lugar_id,
+        estado_id: nuevoGrupo.estado_id
+      },
+      transaction
+    });
+
+    let nuevoSKU = '';
+    try {
+      const [producto, local, lugar] = await Promise.all([
+        ProductosModel.findByPk(nuevoGrupo.producto_id),
+        LocalesModel.findByPk(nuevoGrupo.local_id),
+        LugaresModel.findByPk(nuevoGrupo.lugar_id)
+      ]);
+      nuevoSKU = `${slugify(producto?.nombre)}-${slugify(
+        local?.nombre
+      )}-${slugify(lugar?.nombre)}`;
+    } catch {
+      nuevoSKU = `${nuevoGrupo.producto_id}-${nuevoGrupo.local_id}-${nuevoGrupo.lugar_id}`;
+    }
+
+    if (stockDestino) {
+      await stockDestino.update(
+        {
+          cantidad: stockDestino.cantidad + cantidad,
+          en_exhibicion: nuevoGrupo.en_exhibicion
         },
-        transaction
-      });
-
-      if (!stockOrigen || stockOrigen.cantidad < cantidad) {
-        throw new Error(
-          `No hay suficiente stock en origen para talle ${talle_id}`
-        );
-      }
-
-      // 🔴 **VERIFICAR VENTAS ASOCIADAS**
-      const ventaAsociada = await DetalleVentaModel.findOne({
-        where: { stock_id: stockOrigen.id }
-      });
-      if (ventaAsociada) {
-        throw new Error(
-          `No se puede transferir el talle ${talle_id} porque tiene ventas asociadas.`
-        );
-      }
-
-      // Restar en origen o eliminar si llega a cero
-      const nuevaCantidadOrigen = stockOrigen.cantidad - cantidad;
-      if (nuevaCantidadOrigen <= 0) {
-        await stockOrigen.destroy({ transaction });
-      } else {
-        await stockOrigen.update(
-          { cantidad: nuevaCantidadOrigen },
-          { transaction }
-        );
-      }
-
-      // 2. Sumar stock en nuevoGrupo (o crear si no existe)
-      const stockDestino = await StockModel.findOne({
-        where: {
+        { transaction }
+      );
+    } else {
+      await StockModel.create(
+        {
           producto_id: nuevoGrupo.producto_id,
-          talle_id,
           local_id: nuevoGrupo.local_id,
           lugar_id: nuevoGrupo.lugar_id,
-          estado_id: nuevoGrupo.estado_id
+          estado_id: nuevoGrupo.estado_id,
+          cantidad,
+          en_exhibicion: nuevoGrupo.en_exhibicion,
+          codigo_sku: nuevoSKU
         },
-        transaction
-      });
-
-      if (stockDestino) {
-        await stockDestino.update(
-          {
-            cantidad: stockDestino.cantidad + cantidad,
-            en_perchero: nuevoGrupo.en_perchero
-          },
-          { transaction }
-        );
-      } else {
-        // Armado de SKU (podés hacerlo más descriptivo si querés)
-        const nuevoSKU = `${nuevoGrupo.producto_id}-${talle_id}-${nuevoGrupo.local_id}-${nuevoGrupo.lugar_id}`;
-        await StockModel.create(
-          {
-            producto_id: nuevoGrupo.producto_id,
-            talle_id,
-            local_id: nuevoGrupo.local_id,
-            lugar_id: nuevoGrupo.lugar_id,
-            estado_id: nuevoGrupo.estado_id,
-            cantidad,
-            en_perchero: nuevoGrupo.en_perchero,
-            codigo_sku: nuevoSKU
-          },
-          { transaction }
-        );
-      }
+        { transaction }
+      );
     }
 
     await transaction.commit();
-    res.json({ message: 'Stock transferido correctamente' });
+    res.json({ message: 'Stock transferido correctamente.' });
   } catch (error) {
     await transaction.rollback();
     res.status(500).json({
-      mensajeError:
-        error.message ||
-        'Error al transferir stock. Puede que existan ventas vinculadas.'
+      mensajeError: error.message || 'Error al transferir stock.'
     });
   }
 };
+
 
 // Elimina TODO el stock del grupo
 

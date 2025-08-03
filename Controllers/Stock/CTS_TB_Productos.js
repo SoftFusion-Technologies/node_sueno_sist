@@ -63,7 +63,11 @@ export const CR_Producto_CTS = async (req, res) => {
     precio,
     descuento_porcentaje,
     imagen_url,
-    estado
+    estado,
+    marca,
+    modelo,
+    medida,
+    codigo_sku
   } = req.body;
 
   try {
@@ -84,7 +88,11 @@ export const CR_Producto_CTS = async (req, res) => {
       descuento_porcentaje: descuentoNum > 0 ? descuentoNum : null,
       precio_con_descuento: precioConDescuento,
       imagen_url,
-      estado
+      estado,
+      marca,
+      modelo,
+      medida,
+      codigo_sku
     });
 
     res.json({ message: 'Producto creado correctamente', producto: nuevo });
@@ -131,7 +139,11 @@ export const UR_Producto_CTS = async (req, res) => {
     precio,
     descuento_porcentaje,
     imagen_url,
-    estado
+    estado,
+    marca,
+    modelo,
+    medida,
+    codigo_sku
   } = req.body;
 
   try {
@@ -153,17 +165,22 @@ export const UR_Producto_CTS = async (req, res) => {
         descuento_porcentaje: descuentoNum > 0 ? descuentoNum : null,
         precio_con_descuento: precioConDescuento,
         imagen_url,
-        estado
+        estado,
+        marca,
+        modelo,
+        medida,
+        codigo_sku
       },
       { where: { id } }
     );
 
     res.json({ message: 'Producto actualizado correctamente' });
   } catch (error) {
-    console.error('❌ Error en UP_Producto_CTS:', error);
+    console.error('❌ Error en UR_Producto_CTS:', error);
     res.status(500).json({ mensajeError: error.message });
   }
 };
+
 // Aumentar o disminuir precios por porcentaje (global o por categoría)
 export const AUM_Productos_Porcentaje_CTS = async (req, res) => {
   const { porcentaje, categorias, usarInflacion } = req.body;

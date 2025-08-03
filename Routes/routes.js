@@ -39,15 +39,6 @@ import {
 } from '../Controllers/Stock/CTS_TB_Productos.js';
 // Importar controladores de productos
 
-// Importar controladores de talles
-import {
-  OBRS_Talles_CTS,
-  OBR_Talle_CTS,
-  CR_Talle_CTS,
-  ER_Talle_CTS,
-  UR_Talle_CTS
-} from '../Controllers/Stock/CTS_TB_Talles.js';
-// Importar controladores de talles
 
 // Importar controladores de lugares
 import {
@@ -158,16 +149,6 @@ router.post('/productos/deshacer-ajuste', DESH_DeshacerAjustePrecios_CTS);
 
 router.post('/aplicar-descuento', AUM_Productos_Descuento_CTS);
 router.post('/deshacer-descuento', DESH_DeshacerDescuento_CTS);
-
-// ----------------------------------------------------------------
-// Rutas para operaciones CRUD en la tabla 'talles'
-// ----------------------------------------------------------------
-
-router.get('/talles', OBRS_Talles_CTS);
-router.get('/talles/:id', OBR_Talle_CTS);
-router.post('/talles', CR_Talle_CTS);
-router.delete('/talles/:id', ER_Talle_CTS);
-router.put('/talles/:id', UR_Talle_CTS);
 
 // ----------------------------------------------------------------
 // Rutas para operaciones CRUD en la tabla 'Lugares'

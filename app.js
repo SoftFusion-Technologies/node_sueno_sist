@@ -280,7 +280,6 @@ app.get('/ventas/:id/detalle', async (req, res) => {
       FROM detalle_venta dv
       LEFT JOIN stock s ON dv.stock_id = s.id
       LEFT JOIN productos p ON s.producto_id = p.id
-      LEFT JOIN talles t ON s.talle_id = t.id
       WHERE dv.venta_id = ?
     `,
       [ventaId]
