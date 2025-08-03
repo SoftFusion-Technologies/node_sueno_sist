@@ -14,6 +14,7 @@
 import MD_TB_Users from '../Models/MD_TB_Users.js';
 import { LocalesModel } from '../Models/Stock/MD_TB_Locales.js';
 import bcrypt from 'bcryptjs';
+import { registrarLog } from '../Helpers/registrarLog.js';
 
 const UserModel = MD_TB_Users.UserModel;
 
@@ -45,7 +46,7 @@ export const OBR_Usuario_CTS = async (req, res) => {
 
 // Crear un nuevo usuario
 export const CR_Usuario_CTS = async (req, res) => {
-  const { nombre, email, password, rol, local_id } = req.body;
+  const { nombre, email, password, rol, local_id, usuario_log_id } = req.body;
 
   if (!email || !password || !nombre) {
     return res.status(400).json({
@@ -54,17 +55,21 @@ export const CR_Usuario_CTS = async (req, res) => {
   }
 
   try {
-    // Hashear la contraseña antes de guardar
-    const salt = await bcrypt.genSalt(10); // 10 es el valor estándar de rounds
+    const salt = await bcrypt.genSalt(10);
     const hashedPassword = await bcrypt.hash(password, salt);
 
     const nuevo = await UserModel.create({
       nombre,
       email,
-      password: hashedPassword, // Guardamos la password hasheada
+      password: hashedPassword,
       rol,
       local_id
     });
+
+    const descripcion = `creó al usuario "${nombre}" con email "${email}" y rol "${rol}"`;
+
+    await registrarLog(req, 'usuarios', 'crear', descripcion, usuario_log_id);
+
     res.json({ message: 'Usuario creado correctamente', usuario: nuevo });
   } catch (error) {
     console.error('Error al crear usuario:', error);
@@ -77,11 +82,25 @@ export const CR_Usuario_CTS = async (req, res) => {
 
 // Eliminar un usuario
 export const ER_Usuario_CTS = async (req, res) => {
-  try {
-    const eliminado = await UserModel.destroy({ where: { id: req.params.id } });
+  const { usuario_log_id } = req.body;
 
-    if (!eliminado)
+  try {
+    const usuario = await UserModel.findByPk(req.params.id);
+    if (!usuario)
       return res.status(404).json({ mensajeError: 'Usuario no encontrado' });
+
+    await UserModel.destroy({ where: { id: req.params.id } });
+
+    const descripcion = `eliminó al usuario "${usuario.nombre}" con email "${usuario.email}" y rol "${usuario.rol}"`;
+    console.log('🧾 usuario_log_id recibido:', usuario_log_id);
+
+    await registrarLog(
+      req,
+      'usuarios',
+      'eliminar',
+      descripcion,
+      usuario_log_id
+    );
 
     res.json({ message: 'Usuario eliminado correctamente' });
   } catch (error) {
@@ -92,14 +111,44 @@ export const ER_Usuario_CTS = async (req, res) => {
 // Actualizar un usuario
 export const UR_Usuario_CTS = async (req, res) => {
   const { id } = req.params;
+  const { usuario_log_id } = req.body;
 
   try {
-    const [updated] = await UserModel.update(req.body, {
-      where: { id }
-    });
+    const usuarioAnterior = await UserModel.findByPk(id);
+    if (!usuarioAnterior) {
+      return res.status(404).json({ mensajeError: 'Usuario no encontrado' });
+    }
+
+    // Guardamos antes de actualizar
+    const cambios = [];
+    for (const key of ['nombre', 'email', 'rol', 'local_id']) {
+      if (req.body[key] && req.body[key] !== usuarioAnterior[key]?.toString()) {
+        cambios.push(
+          `cambió el campo "${key}" de "${usuarioAnterior[key]}" a "${req.body[key]}"`
+        );
+      }
+    }
+
+    const [updated] = await UserModel.update(req.body, { where: { id } });
 
     if (updated === 1) {
       const actualizado = await UserModel.findByPk(id);
+
+      const descripcion =
+        cambios.length > 0
+          ? `actualizó el usuario "${usuarioAnterior.nombre}" (${
+              usuarioAnterior.email
+            }) y ${cambios.join(', ')}`
+          : `actualizó el usuario "${usuarioAnterior.nombre}" sin cambios relevantes`;
+
+      await registrarLog(
+        req,
+        'usuarios',
+        'editar',
+        descripcion,
+        usuario_log_id
+      );
+
       res.json({ message: 'Usuario actualizado correctamente', actualizado });
     } else {
       res.status(404).json({ mensajeError: 'Usuario no encontrado' });

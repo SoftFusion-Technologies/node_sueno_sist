@@ -16,7 +16,7 @@ import dotenv from 'dotenv';
 import db from '../DataBase/db.js';
 import { DataTypes } from 'sequelize';
 import { LocalesModel } from './Stock/MD_TB_Locales.js';
-
+import { LogModel } from './Seguridad/MD_TB_Logs.js';
 if (process.env.NODE_ENV !== 'production') {
   dotenv.config();
 }

@@ -46,6 +46,10 @@ import { DetalleVentaCombosModel } from './Combos/MD_TB_DetalleVentaCombos.js';
 import { ComboVentaLogModel } from './Combos/MD_TB_ComboVentaLog.js';
 // RELACIONES MODULO DE COMBOS
 
+// RELACIONES LOGS - USUARIOS
+import { LogModel } from './Seguridad/MD_TB_Logs.js';
+// RELACIONES LOGS - USUARIOS
+
 // Relaciones de Stock con otras tablas
 StockModel.belongsTo(ProductosModel, { foreignKey: 'producto_id' });
 StockModel.belongsTo(TallesModel, { foreignKey: 'talle_id' });
@@ -231,3 +235,7 @@ CombosModel.hasMany(ComboVentaLogModel, {
   as: 'ventas_log'
 });
 // RELACIONES MODULO DE COMBOS
+
+// RELACIONES LOGS - USUARIOS
+LogModel.belongsTo(UserModel, { foreignKey: 'usuario_id', as: 'usuario' });
+UserModel.hasMany(LogModel, { foreignKey: 'usuario_id', as: 'logs' });

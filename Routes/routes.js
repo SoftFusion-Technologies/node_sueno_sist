@@ -12,6 +12,7 @@
 
 import express from 'express'; // Importa la librería Express
 const router = express.Router(); // Inicializa el router
+import { authenticateToken } from '../Security/auth.js'; // Importa las funciones del archivo auth.js
 
 // Importar controladores de locales
 import {
@@ -207,11 +208,10 @@ router.post('/eliminar-grupo', ER_StockPorGrupo);
 // Rutas para operaciones CRUD en la tabla 'usuarios'
 // ----------------------------------------------------------------
 
-router.get('/usuarios', OBRS_Usuarios_CTS);
-router.get('/usuarios/:id', OBR_Usuario_CTS);
-router.post('/usuarios', CR_Usuario_CTS);
-router.delete('/usuarios/:id', ER_Usuario_CTS);
-router.put('/usuarios/:id', UR_Usuario_CTS);
+router.post('/usuarios', authenticateToken, CR_Usuario_CTS);
+router.put('/usuarios/:id', authenticateToken, UR_Usuario_CTS);
+router.delete('/usuarios/:id', authenticateToken, ER_Usuario_CTS);
+router.get('/usuarios', authenticateToken, OBRS_Usuarios_CTS);
 
 // ----------------------------------------------------------------
 // Rutas para operaciones CRUD en la tabla 'clientes'
@@ -520,7 +520,10 @@ import {
 } from '../Controllers/Combos/CTS_TB_ComboProductosPermitidos.js';
 
 router.get('/combo-productos-permitidos', OBRS_ComboProductosPermitidos_CTS);
-router.get('/combo-productos-permitidos/:combo_id', OBRS_PermitidosPorCombo_CTS);
+router.get(
+  '/combo-productos-permitidos/:combo_id',
+  OBRS_PermitidosPorCombo_CTS
+);
 router.post('/combo-productos-permitidos', CR_ComboProductoPermitido_CTS);
 router.put('/combo-productos-permitidos/:id', UR_ComboProductoPermitido_CTS);
 router.delete('/combo-productos-permitidos/:id', ER_ComboProductoPermitido_CTS);
@@ -550,4 +553,10 @@ router.get('/combo-venta-log', OBRS_ComboVentaLog_CTS);
 router.get('/combo-venta-log/:venta_id', OBRS_CombosPorVenta_CTS);
 router.post('/combo-venta-log', CR_ComboVentaLog_CTS);
 router.delete('/combo-venta-log/:id', ER_ComboVentaLog_CTS);
+
+import { OBRS_Logs_CTS, OBR_Log_CTS } from '../Controllers/CTS_TB_Logs.js';
+
+router.get('/logs', authenticateToken, OBRS_Logs_CTS);
+router.get('/logs/:id', authenticateToken, OBR_Log_CTS);
+
 export default router;
