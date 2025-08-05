@@ -14,7 +14,16 @@ import { Op } from 'sequelize';
 
 // Obtener todos los logs (con filtros opcionales)
 export const OBRS_Logs_CTS = async (req, res) => {
-  const { usuario_id, modulo, accion, fecha_inicio, fecha_fin, q } = req.query;
+  const {
+    usuario_id,
+    modulo,
+    accion,
+    fecha_inicio,
+    fecha_fin,
+    q,
+    limit = 10,
+    offset = 0
+  } = req.query;
 
   try {
     const where = {};
@@ -29,25 +38,34 @@ export const OBRS_Logs_CTS = async (req, res) => {
         where.fecha_hora[Op.lte] = new Date(fecha_fin + 'T23:59:59');
     }
 
-    const logs = await LogModel.findAll({
-      where, // ✅ aplicar filtros
-      include: [
-        {
-          model: UserModel,
-          as: 'usuario',
-          attributes: ['id', 'nombre', 'email'],
-          where: q ? { nombre: { [Op.like]: `%${q}%` } } : undefined // 🔍 filtro por nombre del usuario
-        }
-      ],
+    const include = [
+      {
+        model: UserModel,
+        as: 'usuario',
+        attributes: ['id', 'nombre', 'email'],
+        where: q ? { nombre: { [Op.like]: `%${q}%` } } : undefined
+      }
+    ];
+
+    // ⏳ Obtener total y registros paginados
+    const { count, rows } = await LogModel.findAndCountAll({
+      where,
+      include,
+      limit: parseInt(limit),
+      offset: parseInt(offset),
       order: [['fecha_hora', 'DESC']]
     });
 
-    res.json(logs);
+    res.json({
+      total: count,
+      logs: rows
+    });
   } catch (error) {
     console.error('Error al obtener logs:', error);
     res.status(500).json({ mensajeError: error.message });
   }
 };
+
 
 // Obtener un log por ID
 export const OBR_Log_CTS = async (req, res) => {
