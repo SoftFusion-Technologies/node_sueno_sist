@@ -1,10 +1,10 @@
 /*
  * Programador: Benjamin Orellana
  * Fecha Creación: 03 / 08 / 2025
- * Versión: 2.0
+ * Versión: 2.1
  *
  * Descripción:
- * Modelo Sequelize para la tabla 'stock' adaptado al sistema de "El Sueño"
+ * Modelo Sequelize actualizado para la tabla 'stock' según estructura de la base de datos del sistema "El Sueño"
  */
 
 import dotenv from 'dotenv';
@@ -18,6 +18,11 @@ if (process.env.NODE_ENV !== 'production') {
 export const StockModel = db.define(
   'stock',
   {
+    id: {
+      type: DataTypes.INTEGER.UNSIGNED,
+      autoIncrement: true,
+      primaryKey: true
+    },
     producto_id: {
       type: DataTypes.INTEGER.UNSIGNED,
       allowNull: false,
@@ -52,15 +57,31 @@ export const StockModel = db.define(
     },
     cantidad: {
       type: DataTypes.INTEGER,
+      allowNull: false,
       defaultValue: 0
     },
     en_exhibicion: {
       type: DataTypes.BOOLEAN,
+      allowNull: false,
       defaultValue: false
     },
     observaciones: {
       type: DataTypes.TEXT,
       allowNull: true
+    },
+    codigo_sku: {
+      type: DataTypes.STRING,
+      allowNull: true
+    },
+    created_at: {
+      type: DataTypes.DATE,
+      allowNull: false,
+      defaultValue: DataTypes.NOW
+    },
+    updated_at: {
+      type: DataTypes.DATE,
+      allowNull: false,
+      defaultValue: DataTypes.NOW
     }
   },
   {

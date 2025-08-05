@@ -62,7 +62,11 @@ export const OBR_Stock_CTS = async (req, res) => {
 // Crear nuevo registro de stock
 export const CR_Stock_CTS = async (req, res) => {
   try {
-    const nuevo = await StockModel.create(req.body);
+    const { producto_id } = req.body;
+    const producto = await ProductosModel.findByPk(producto_id);
+    const codigo_sku = producto?.codigo_sku || `SKU-${producto_id}`;
+
+    const nuevo = await StockModel.create({ ...req.body, codigo_sku });
     res.json({ message: 'Stock creado correctamente', stock: nuevo });
   } catch (error) {
     res.status(500).json({ mensajeError: error.message });
@@ -101,6 +105,7 @@ export const ER_Stock_CTS = async (req, res) => {
     res.status(500).json({ mensajeError: error.message });
   }
 };
+
 // Actualizar registro de stock y fusionar si existe la combinación
 export const UR_Stock_CTS = async (req, res) => {
   const {
@@ -112,9 +117,17 @@ export const UR_Stock_CTS = async (req, res) => {
     en_exhibicion,
     observaciones
   } = req.body;
+
   const id = req.params.id;
+  const cantidadNum = Number(cantidad);
+  if (isNaN(cantidadNum)) {
+    return res.status(400).json({ mensajeError: 'Cantidad inválida' });
+  }
 
   try {
+    const producto = await ProductosModel.findByPk(producto_id);
+    const codigo_sku = producto?.codigo_sku || `SKU-${producto_id}`;
+
     const existente = await StockModel.findOne({
       where: {
         producto_id,
@@ -127,7 +140,7 @@ export const UR_Stock_CTS = async (req, res) => {
 
     if (existente) {
       const nuevoStock = await existente.update({
-        cantidad: existente.cantidad + Number(cantidad),
+        cantidad: existente.cantidad + cantidadNum,
         en_exhibicion: en_exhibicion ?? existente.en_exhibicion
       });
       await StockModel.destroy({ where: { id } });
@@ -140,9 +153,10 @@ export const UR_Stock_CTS = async (req, res) => {
         local_id,
         lugar_id,
         estado_id,
-        cantidad,
+        cantidad: cantidadNum,
         en_exhibicion,
-        observaciones
+        observaciones,
+        codigo_sku
       },
       { where: { id } }
     );
@@ -157,6 +171,8 @@ export const UR_Stock_CTS = async (req, res) => {
     res.status(500).json({ mensajeError: error.message });
   }
 };
+
+
 
 export const ER_StockPorProducto = async (req, res) => {
   try {
@@ -178,20 +194,23 @@ export const DISTRIBUIR_Stock_CTS = async (req, res) => {
     observaciones = null
   } = req.body;
 
+  const cantidadNum = Number(cantidad);
   if (
     !producto_id ||
     !local_id ||
     !lugar_id ||
     !estado_id ||
-    cantidad == null
+    isNaN(cantidadNum) ||
+    cantidadNum < 0
   ) {
-    return res.status(400).json({
-      mensajeError: 'Faltan datos obligatorios.'
-    });
+    return res.status(400).json({ mensajeError: 'Datos inválidos.' });
   }
 
   const transaction = await db.transaction();
   try {
+    const producto = await ProductosModel.findByPk(producto_id);
+    const codigo_sku = producto?.codigo_sku || `SKU-${producto_id}`;
+
     const stockExistente = await StockModel.findOne({
       where: {
         producto_id,
@@ -202,63 +221,31 @@ export const DISTRIBUIR_Stock_CTS = async (req, res) => {
       transaction
     });
 
-    // Generar un SKU amigable o fallback con IDs
-    let codigo_sku = '';
-    try {
-      const [producto, local, lugar] = await Promise.all([
-        ProductosModel.findByPk(producto_id),
-        LocalesModel.findByPk(local_id),
-        LugaresModel.findByPk(lugar_id)
-      ]);
-      codigo_sku = `${slugify(producto?.nombre)}-${slugify(
-        local?.nombre
-      )}-${slugify(lugar?.nombre)}`;
-    } catch {
-      codigo_sku = `${producto_id}-${local_id}-${lugar_id}`;
-    }
-
     if (stockExistente) {
       await stockExistente.update(
-        { cantidad, en_exhibicion, observaciones, codigo_sku },
+        { cantidad: cantidadNum, en_exhibicion, observaciones, codigo_sku },
         { transaction }
       );
-      console.log(
-        `[UPDATE] Stock actualizado: ${codigo_sku} a cantidad ${cantidad}`
-      );
     } else {
-      try {
-        await StockModel.create(
-          {
-            producto_id,
-            local_id,
-            lugar_id,
-            estado_id,
-            cantidad,
-            en_exhibicion,
-            observaciones,
-            codigo_sku
-          },
-          { transaction }
-        );
-        console.log(
-          `[CREATE] Nuevo stock creado: ${codigo_sku} con cantidad ${cantidad}`
-        );
-      } catch (err) {
-        if (err.name === 'SequelizeUniqueConstraintError') {
-          return res.status(409).json({
-            mensajeError:
-              'Ya existe un stock para este producto y ubicación. Recargá y editá el stock existente.'
-          });
-        }
-        throw err;
-      }
+      await StockModel.create(
+        {
+          producto_id,
+          local_id,
+          lugar_id,
+          estado_id,
+          cantidad: cantidadNum,
+          en_exhibicion,
+          observaciones,
+          codigo_sku
+        },
+        { transaction }
+      );
     }
 
     await transaction.commit();
     res.json({ message: 'Stock distribuido correctamente.' });
   } catch (error) {
     await transaction.rollback();
-    console.error('Error en DISTRIBUIR_Stock_CTS:', error);
     res.status(500).json({ mensajeError: error.message });
   }
 };
@@ -274,19 +261,18 @@ function slugify(valor) {
     .replace(/-+$/, '');
 }
 
+
+// Transferir stock (actualizado con código SKU)
 export const TRANSFERIR_Stock_CTS = async (req, res) => {
   const { grupoOriginal, nuevoGrupo, cantidad } = req.body;
+  const cantidadNum = Number(cantidad);
 
-  if (!grupoOriginal || !nuevoGrupo || cantidad == null) {
-    return res
-      .status(400)
-      .json({ mensajeError: 'Datos incompletos para transferir stock.' });
+  if (!grupoOriginal || !nuevoGrupo || isNaN(cantidadNum) || cantidadNum <= 0) {
+    return res.status(400).json({ mensajeError: 'Datos inválidos para transferir stock.' });
   }
 
   const transaction = await db.transaction();
-
   try {
-    // 1. Buscar y validar stock en grupo original
     const stockOrigen = await StockModel.findOne({
       where: {
         producto_id: grupoOriginal.producto_id,
@@ -297,32 +283,27 @@ export const TRANSFERIR_Stock_CTS = async (req, res) => {
       transaction
     });
 
-    if (!stockOrigen || stockOrigen.cantidad < cantidad) {
+    if (!stockOrigen || stockOrigen.cantidad < cantidadNum) {
       throw new Error('No hay suficiente stock en el grupo original.');
     }
 
-    // Verificar ventas asociadas
     const ventaAsociada = await DetalleVentaModel.findOne({
       where: { stock_id: stockOrigen.id }
     });
     if (ventaAsociada) {
-      throw new Error(
-        'El stock original tiene ventas asociadas y no puede transferirse.'
-      );
+      throw new Error('El stock original tiene ventas asociadas y no puede transferirse.');
     }
 
-    // Restar en origen
-    const nuevaCantidadOrigen = stockOrigen.cantidad - cantidad;
+    const nuevaCantidadOrigen = stockOrigen.cantidad - cantidadNum;
     if (nuevaCantidadOrigen <= 0) {
       await stockOrigen.destroy({ transaction });
     } else {
-      await stockOrigen.update(
-        { cantidad: nuevaCantidadOrigen },
-        { transaction }
-      );
+      await stockOrigen.update({ cantidad: nuevaCantidadOrigen }, { transaction });
     }
 
-    // 2. Buscar o crear stock en el nuevo grupo
+    const producto = await ProductosModel.findByPk(nuevoGrupo.producto_id);
+    const codigo_sku = producto?.codigo_sku || `SKU-${nuevoGrupo.producto_id}`;
+
     const stockDestino = await StockModel.findOne({
       where: {
         producto_id: nuevoGrupo.producto_id,
@@ -333,25 +314,12 @@ export const TRANSFERIR_Stock_CTS = async (req, res) => {
       transaction
     });
 
-    let nuevoSKU = '';
-    try {
-      const [producto, local, lugar] = await Promise.all([
-        ProductosModel.findByPk(nuevoGrupo.producto_id),
-        LocalesModel.findByPk(nuevoGrupo.local_id),
-        LugaresModel.findByPk(nuevoGrupo.lugar_id)
-      ]);
-      nuevoSKU = `${slugify(producto?.nombre)}-${slugify(
-        local?.nombre
-      )}-${slugify(lugar?.nombre)}`;
-    } catch {
-      nuevoSKU = `${nuevoGrupo.producto_id}-${nuevoGrupo.local_id}-${nuevoGrupo.lugar_id}`;
-    }
-
     if (stockDestino) {
       await stockDestino.update(
         {
-          cantidad: stockDestino.cantidad + cantidad,
-          en_exhibicion: nuevoGrupo.en_exhibicion
+          cantidad: stockDestino.cantidad + cantidadNum,
+          en_exhibicion: nuevoGrupo.en_exhibicion,
+          codigo_sku
         },
         { transaction }
       );
@@ -362,9 +330,10 @@ export const TRANSFERIR_Stock_CTS = async (req, res) => {
           local_id: nuevoGrupo.local_id,
           lugar_id: nuevoGrupo.lugar_id,
           estado_id: nuevoGrupo.estado_id,
-          cantidad,
+          cantidad: cantidadNum,
           en_exhibicion: nuevoGrupo.en_exhibicion,
-          codigo_sku: nuevoSKU
+          observaciones: nuevoGrupo.observaciones || null,
+          codigo_sku
         },
         { transaction }
       );
@@ -374,37 +343,42 @@ export const TRANSFERIR_Stock_CTS = async (req, res) => {
     res.json({ message: 'Stock transferido correctamente.' });
   } catch (error) {
     await transaction.rollback();
-    res.status(500).json({
-      mensajeError: error.message || 'Error al transferir stock.'
-    });
+    res.status(500).json({ mensajeError: error.message });
   }
 };
+
+
 
 
 // Elimina TODO el stock del grupo
 
 export const ER_StockPorGrupo = async (req, res) => {
   const { producto_id, local_id, lugar_id, estado_id } = req.body;
+
   if (!producto_id || !local_id || !lugar_id || !estado_id) {
-    return res.status(400).json({ mensajeError: 'Datos incompletos' });
+    return res.status(400).json({ mensajeError: 'Datos incompletos.' });
   }
+
   try {
-    // 1. Buscar stocks del grupo
+    // 1. Buscar stock del grupo
     const stocksGrupo = await StockModel.findAll({
       where: { producto_id, local_id, lugar_id, estado_id },
       attributes: ['id', 'cantidad']
     });
+
     if (!stocksGrupo.length) {
       return res
         .status(404)
         .json({ mensajeError: 'No existe ningún stock en ese grupo.' });
     }
+
     const stockIds = stocksGrupo.map((s) => s.id);
 
-    // 2. Validar ventas asociadas en detalle_venta
+    // 2. Verificar si alguna está asociada a ventas
     const ventaAsociada = await DetalleVentaModel.findOne({
       where: { stock_id: stockIds }
     });
+
     if (ventaAsociada) {
       return res.status(409).json({
         mensajeError:
@@ -412,15 +386,16 @@ export const ER_StockPorGrupo = async (req, res) => {
       });
     }
 
-    // 3. Validar stock en positivo
-    if (stocksGrupo.some((s) => s.cantidad > 0)) {
+    // 3. Verificar si hay stock positivo
+    const hayStock = stocksGrupo.some((s) => Number(s.cantidad) > 0);
+    if (hayStock) {
       return res.status(409).json({
         mensajeError:
           'No se puede eliminar: aún hay stock disponible en el grupo.'
       });
     }
 
-    // 4. Eliminar
+    // 4. Eliminar registros
     await StockModel.destroy({
       where: { producto_id, local_id, lugar_id, estado_id }
     });
