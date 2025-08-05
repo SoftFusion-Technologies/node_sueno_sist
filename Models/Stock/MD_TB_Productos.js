@@ -2,11 +2,10 @@
  * Programador: Benjamin Orellana
  * Fecha Creación: 21 / 06 / 2025
  * Última Modificación: 03 / 08 / 2025
- * Versión: 2.0
+ * Versión: 2.1
  *
  * Descripción:
- * Este archivo (MD_TB_Productos.js) contiene la definición del modelo Sequelize para la tabla de productos,
- * adaptado al sistema de gestión de colchones, sommiers, muebles y accesorios de "El Sueño".
+ * Modelo Sequelize para la tabla `productos` adaptado al sistema de ventas de muebles, colchones y accesorios de "El Sueño".
  *
  * Tema: Modelos - Productos
  * Capa: Backend
@@ -20,10 +19,14 @@ if (process.env.NODE_ENV !== 'production') {
   dotenv.config();
 }
 
-// Definición del modelo de la tabla 'productos'
 export const ProductosModel = db.define(
   'productos',
   {
+    id: {
+      type: DataTypes.INTEGER.UNSIGNED,
+      autoIncrement: true,
+      primaryKey: true
+    },
     nombre: {
       type: DataTypes.STRING(150),
       allowNull: false
@@ -41,7 +44,7 @@ export const ProductosModel = db.define(
       allowNull: true
     },
     medida: {
-      type: DataTypes.STRING(50), // Ej: 140x190 o 2 plazas
+      type: DataTypes.STRING(50),
       allowNull: true
     },
     categoria_id: {
@@ -58,13 +61,11 @@ export const ProductosModel = db.define(
     },
     descuento_porcentaje: {
       type: DataTypes.DECIMAL(5, 2),
-      allowNull: true,
-      defaultValue: null
+      defaultValue: 0.0
     },
     precio_con_descuento: {
       type: DataTypes.DECIMAL(18, 2),
-      allowNull: true,
-      defaultValue: null
+      defaultValue: 0.0
     },
     codigo_sku: {
       type: DataTypes.STRING(100),

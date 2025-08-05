@@ -13,6 +13,7 @@
 import { fn, col } from 'sequelize';
 import { CategoriasModel } from '../../Models/Stock/MD_TB_Categorias.js';
 import { ProductosModel } from '../../Models/Stock/MD_TB_Productos.js'; // ⬅️ tu modelo de productos
+import { registrarLog } from '../../Helpers/registrarLog.js';
 
 /* =========================================================================
  * 1) Obtener TODAS las categorías + cantidad de productos
@@ -77,13 +78,24 @@ export const OBR_Categoria_CTS = async (req, res) => {
  * 3) Crear nueva categoría (sin cambios)
  * =======================================================================*/
 export const CR_Categoria_CTS = async (req, res) => {
-  const { nombre, descripcion, estado } = req.body;
+  const { nombre, descripcion, estado, usuario_log_id } = req.body;
   try {
     const nueva = await CategoriasModel.create({
       nombre,
       descripcion,
       estado: estado || 'activo'
     });
+
+    const descripcion2 = `creó una nueva categoría llamada "${nombre}"`;
+
+    await registrarLog(
+      req,
+      'categorias',
+      'crear',
+      descripcion2,
+      usuario_log_id
+    );
+
     res.json({ message: 'Categoría creada correctamente', categoria: nueva });
   } catch (error) {
     res.status(500).json({ mensajeError: error.message });
@@ -95,15 +107,54 @@ export const CR_Categoria_CTS = async (req, res) => {
  * =======================================================================*/
 export const UR_Categoria_CTS = async (req, res) => {
   const { id } = req.params;
+  const { usuario_log_id } = req.body;
+
   try {
+    const categoriaAnterior = await CategoriasModel.findByPk(id);
+    if (!categoriaAnterior) {
+      return res.status(404).json({ mensajeError: 'Categoría no encontrada' });
+    }
+
+    const camposAuditar = ['nombre', 'descripcion', 'estado', 'color'];
+    const cambios = [];
+
+    for (const key of camposAuditar) {
+      if (
+        req.body[key] !== undefined &&
+        req.body[key]?.toString() !== categoriaAnterior[key]?.toString()
+      ) {
+        cambios.push(
+          `cambió el campo "${key}" de "${categoriaAnterior[key]}" a "${req.body[key]}"`
+        );
+      }
+    }
+
     const [updated] = await CategoriasModel.update(req.body, { where: { id } });
+
     if (updated === 1) {
       const actualizado = await CategoriasModel.findByPk(id);
-      res.json({ message: 'Categoría actualizada', actualizado });
+
+      const descripcion =
+        cambios.length > 0
+          ? `actualizó la categoría "${
+              categoriaAnterior.nombre
+            }" y ${cambios.join(', ')}`
+          : `actualizó la categoría "${categoriaAnterior.nombre}" sin cambios relevantes`;
+
+      await registrarLog(
+        req,
+        'categorias',
+        'editar',
+        descripcion,
+        usuario_log_id
+      );
+
+      res.json({ message: 'Categoría actualizada correctamente', actualizado });
     } else {
       res.status(404).json({ mensajeError: 'Categoría no encontrada' });
     }
   } catch (error) {
+    console.error('UR_Categoria_CTS:', error);
     res.status(500).json({ mensajeError: error.message });
   }
 };
@@ -114,9 +165,16 @@ export const UR_Categoria_CTS = async (req, res) => {
  * =======================================================================*/
 export const ER_Categoria_CTS = async (req, res) => {
   const { id } = req.params;
-  const forzar = req.query.forzar === 'true';
+  const { forzar } = req.query;
+  const { usuario_log_id } = req.body;
 
+  console.log('usuariooo', usuario_log_id);
   try {
+    const categoria = await CategoriasModel.findByPk(id);
+    if (!categoria) {
+      return res.status(404).json({ mensajeError: 'Categoría no encontrada' });
+    }
+
     const tieneProductos = await ProductosModel.findOne({
       where: { categoria_id: id }
     });
@@ -143,13 +201,28 @@ export const ER_Categoria_CTS = async (req, res) => {
       return res.status(404).json({ mensajeError: 'Categoría no encontrada' });
     }
 
+    // Log de auditoría (solo si hay usuario_log_id)
+    if (usuario_log_id) {
+      const descripcion = tieneProductos
+        ? `eliminó la categoría "${categoria.nombre}" y desvinculó productos asociados`
+        : `eliminó la categoría "${categoria.nombre}"`;
+
+      await registrarLog(
+        req,
+        'categorias',
+        'eliminar',
+        descripcion,
+        usuario_log_id
+      );
+    }
+
     res.json({
       message: tieneProductos
         ? 'Categoría eliminada y productos desvinculados.'
         : 'Categoría eliminada correctamente.'
     });
   } catch (error) {
-    console.error('ER_Categoria_CTS:', error);
+    console.error('ER_Categoria_CTS - Error interno:', error);
     res.status(500).json({ mensajeError: error.message });
   }
 };
