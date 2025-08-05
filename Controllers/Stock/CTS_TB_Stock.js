@@ -19,6 +19,7 @@ import { EstadosModel } from '../../Models/Stock/MD_TB_Estados.js';
 import { DetalleVentaModel } from '../../Models/Ventas/MD_TB_DetalleVenta.js';
 import db from '../../DataBase/db.js'; // Esta es tu instancia Sequelize
 import { Op } from 'sequelize';
+import { registrarLog } from '../../Helpers/registrarLog.js';
 
 const StockModel = MD_TB_Stock.StockModel;
 
@@ -62,21 +63,51 @@ export const OBR_Stock_CTS = async (req, res) => {
 // Crear nuevo registro de stock
 export const CR_Stock_CTS = async (req, res) => {
   try {
-    const { producto_id } = req.body;
+    const { producto_id, local_id, lugar_id, estado_id, usuario_log_id } =
+      req.body;
+
+    // Obtener los datos necesarios para descripción
     const producto = await ProductosModel.findByPk(producto_id);
+    const local = await LocalesModel.findByPk(local_id);
+    const lugar = await LugaresModel.findByPk(lugar_id);
+    const estado = await EstadosModel.findByPk(estado_id);
+
     const codigo_sku = producto?.codigo_sku || `SKU-${producto_id}`;
 
+    // Crear el stock
     const nuevo = await StockModel.create({ ...req.body, codigo_sku });
+
+    // Descripción para el log
+    const descripcion = `creó un nuevo stock para el producto "${producto?.nombre}" en el local "${local?.nombre}" (lugar: "${lugar?.nombre}", estado: "${estado?.nombre}")`;
+
+    // Registrar log
+    await registrarLog(req, 'stock', 'crear', descripcion, usuario_log_id);
+
     res.json({ message: 'Stock creado correctamente', stock: nuevo });
   } catch (error) {
+    console.error('CR_Stock_CTS:', error);
     res.status(500).json({ mensajeError: error.message });
   }
 };
 
 // Eliminar registro de stock
 export const ER_Stock_CTS = async (req, res) => {
+  const stockId = req.params.id;
+  const { usuario_log_id } = req.body;
+
   try {
-    const stockId = req.params.id;
+    const stock = await StockModel.findByPk(stockId);
+    if (!stock) {
+      return res.status(404).json({ mensajeError: 'Stock no encontrado' });
+    }
+
+    // Obtener info asociada para el log
+    const producto = await ProductosModel.findByPk(stock.producto_id);
+    const local = await LocalesModel.findByPk(stock.local_id);
+    const lugar = await LugaresModel.findByPk(stock.lugar_id);
+    const estado = await EstadosModel.findByPk(stock.estado_id);
+
+    const descripcionContexto = `para el producto "${producto?.nombre}" en el local "${local?.nombre}" (lugar: "${lugar?.nombre}", estado: "${estado?.nombre}")`;
 
     // 1. Buscá si hay ventas asociadas a este stock
     const ventaAsociada = await DetalleVentaModel.findOne({
@@ -86,6 +117,17 @@ export const ER_Stock_CTS = async (req, res) => {
     if (ventaAsociada) {
       // Si hay ventas, NO eliminar. Solo actualizar cantidad a 0.
       await StockModel.update({ cantidad: 0 }, { where: { id: stockId } });
+
+      if (usuario_log_id) {
+        await registrarLog(
+          req,
+          'stock',
+          'editar',
+          `intentó eliminar un stock ${descripcionContexto}, pero estaba vinculado a ventas, por lo que se actualizó la cantidad a 0`,
+          usuario_log_id
+        );
+      }
+
       return res.status(200).json({
         message:
           'Este stock está vinculado a ventas. Se actualizó la cantidad a 0 en vez de eliminar.'
@@ -93,15 +135,24 @@ export const ER_Stock_CTS = async (req, res) => {
     }
 
     // 2. Si NO hay ventas, eliminar normalmente
-    const eliminado = await StockModel.destroy({
-      where: { id: stockId }
-    });
+    const eliminado = await StockModel.destroy({ where: { id: stockId } });
 
     if (!eliminado)
       return res.status(404).json({ mensajeError: 'Stock no encontrado' });
 
+    if (usuario_log_id) {
+      await registrarLog(
+        req,
+        'stock',
+        'eliminar',
+        `eliminó un stock ${descripcionContexto}`,
+        usuario_log_id
+      );
+    }
+
     res.json({ message: 'Stock eliminado correctamente' });
   } catch (error) {
+    console.error('ER_Stock_CTS:', error);
     res.status(500).json({ mensajeError: error.message });
   }
 };
@@ -115,7 +166,8 @@ export const UR_Stock_CTS = async (req, res) => {
     estado_id,
     cantidad,
     en_exhibicion,
-    observaciones
+    observaciones,
+    usuario_log_id
   } = req.body;
 
   const id = req.params.id;
@@ -128,6 +180,11 @@ export const UR_Stock_CTS = async (req, res) => {
     const producto = await ProductosModel.findByPk(producto_id);
     const codigo_sku = producto?.codigo_sku || `SKU-${producto_id}`;
 
+    const stockActual = await StockModel.findByPk(id);
+    if (!stockActual) {
+      return res.status(404).json({ mensajeError: 'Stock no encontrado' });
+    }
+
     const existente = await StockModel.findOne({
       where: {
         producto_id,
@@ -138,13 +195,55 @@ export const UR_Stock_CTS = async (req, res) => {
       }
     });
 
+    // Si hay un stock duplicado → fusionar cantidades
     if (existente) {
+      const cantidadOriginal = existente.cantidad;
       const nuevoStock = await existente.update({
         cantidad: existente.cantidad + cantidadNum,
         en_exhibicion: en_exhibicion ?? existente.en_exhibicion
       });
+
       await StockModel.destroy({ where: { id } });
+
+      if (usuario_log_id) {
+        const local = await LocalesModel.findByPk(local_id);
+        const lugar = await LugaresModel.findByPk(lugar_id);
+        const estado = await EstadosModel.findByPk(estado_id);
+
+        await registrarLog(
+          req,
+          'stock',
+          'editar',
+          `fusionó el stock del producto "${producto?.nombre}" en el local "${local?.nombre}" (lugar: "${lugar?.nombre}", estado: "${estado?.nombre}"). Se sumaron ${cantidadNum} unidades a un stock existente (de ${cantidadOriginal} a ${nuevoStock.cantidad}) y se eliminó el stock original`,
+          usuario_log_id
+        );
+      }
+
       return res.json({ message: 'Stock fusionado', actualizado: nuevoStock });
+    }
+
+    // Auditar cambios campo a campo
+    const camposAuditar = [
+      'producto_id',
+      'local_id',
+      'lugar_id',
+      'estado_id',
+      'cantidad',
+      'en_exhibicion',
+      'observaciones'
+    ];
+
+    const cambios = [];
+
+    for (const campo of camposAuditar) {
+      if (
+        req.body[campo] !== undefined &&
+        req.body[campo]?.toString() !== stockActual[campo]?.toString()
+      ) {
+        cambios.push(
+          `cambió el campo "${campo}" de "${stockActual[campo]}" a "${req.body[campo]}"`
+        );
+      }
     }
 
     const [updated] = await StockModel.update(
@@ -163,16 +262,27 @@ export const UR_Stock_CTS = async (req, res) => {
 
     if (updated === 1) {
       const actualizado = await StockModel.findByPk(id);
-      res.json({ message: 'Stock actualizado', actualizado });
+
+      if (usuario_log_id) {
+        const descripcion =
+          cambios.length > 0
+            ? `actualizó el stock del producto "${
+                producto?.nombre
+              }" y ${cambios.join(', ')}`
+            : `actualizó el stock del producto "${producto?.nombre}" sin cambios relevantes`;
+
+        await registrarLog(req, 'stock', 'editar', descripcion, usuario_log_id);
+      }
+
+      return res.json({ message: 'Stock actualizado', actualizado });
     } else {
-      res.status(404).json({ mensajeError: 'Stock no encontrado' });
+      return res.status(404).json({ mensajeError: 'Stock no encontrado' });
     }
   } catch (error) {
+    console.error('UR_Stock_CTS:', error);
     res.status(500).json({ mensajeError: error.message });
   }
 };
-
-
 
 export const ER_StockPorProducto = async (req, res) => {
   try {
@@ -351,11 +461,11 @@ export const TRANSFERIR_Stock_CTS = async (req, res) => {
 
 
 // Elimina TODO el stock del grupo
-
 export const ER_StockPorGrupo = async (req, res) => {
-  const { producto_id, local_id, lugar_id, estado_id } = req.body;
+  const { producto_id, local_id, lugar_id, estado_id, usuario_log_id } =
+    req.body;
 
-  if (!producto_id || !local_id || !lugar_id || !estado_id) {
+  if (!producto_id || !local_id || !lugar_id || !estado_id || !usuario_log_id) {
     return res.status(400).json({ mensajeError: 'Datos incompletos.' });
   }
 
@@ -395,10 +505,29 @@ export const ER_StockPorGrupo = async (req, res) => {
       });
     }
 
-    // 4. Eliminar registros
-    await StockModel.destroy({
+    // 4. Traer nombres descriptivos
+    const [producto, local, lugar, estado] = await Promise.all([
+      ProductosModel.findByPk(producto_id, { attributes: ['nombre'] }),
+      LocalesModel.findByPk(local_id, { attributes: ['nombre'] }),
+      LugaresModel.findByPk(lugar_id, { attributes: ['nombre'] }),
+      EstadosModel.findByPk(estado_id, { attributes: ['nombre'] })
+    ]);
+
+    // 5. Eliminar registros
+    const eliminados = await StockModel.destroy({
       where: { producto_id, local_id, lugar_id, estado_id }
     });
+
+    // 6. Log más descriptivo
+    const descripcionLog = `eliminó todo el stock del grupo: Producto "${producto?.nombre}", Local "${local?.nombre}", Lugar "${lugar?.nombre}", Estado "${estado?.nombre}". Se eliminaron ${eliminados} registros.`;
+
+    await registrarLog(
+      req,
+      'stock',
+      'eliminar',
+      descripcionLog,
+      usuario_log_id
+    );
 
     return res.json({ message: 'Grupo de stock eliminado exitosamente.' });
   } catch (error) {
@@ -415,3 +544,4 @@ export const ER_StockPorGrupo = async (req, res) => {
       .json({ mensajeError: mensaje + (error.message || '') });
   }
 };
+
