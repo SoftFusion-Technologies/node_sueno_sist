@@ -20,6 +20,84 @@ import { DetalleVentaModel } from '../../Models/Ventas/MD_TB_DetalleVenta.js';
 import db from '../../DataBase/db.js'; // Esta es tu instancia Sequelize
 import { Op } from 'sequelize';
 import { registrarLog } from '../../Helpers/registrarLog.js';
+import { Transaction } from 'sequelize';
+
+// Función para limpiar nombres (similar al front)
+export function slugify(valor) {
+  return String(valor || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '') // quita acentos
+    .toLowerCase()
+    .replace(/['"]/g, '') // saca comillas
+    .replace(/\((.*?)\)/g, '$1') // quita paréntesis (deja el contenido)
+    .replace(/[^a-z0-9]+/g, '-') // cualquier cosa no alfanumérica -> '-'
+    .replace(/^-+|-+$/g, ''); // recorta guiones al inicio/fin
+}
+
+export function buildSku({
+  productoNombre,
+  localNombre,
+  lugarNombre,
+  // opcional: si querés incluirlo en el SKU, pasalo y se agrega
+  estadoNombre,
+  maxLen = 150
+}) {
+  const parts = [
+    slugify(productoNombre),
+    slugify(localNombre),
+    slugify(lugarNombre),
+    slugify(estadoNombre) // solo se agrega si viene (queda limpio)
+  ].filter(Boolean); // evita segmentos vacíos
+
+  let sku = parts.join('-').replace(/-+/g, '-'); // colapsa dobles
+  if (!sku) sku = 'sku'; // fallback mínimo
+  return sku.slice(0, maxLen);
+}
+
+async function ensureUniqueSku(
+  baseSku,
+  localId,
+  excludeId = null,
+  transaction
+) {
+  let candidate = baseSku;
+  let i = 1;
+  while (true) {
+    const exists = await StockModel.findOne({
+      where: {
+        codigo_sku: candidate,
+        local_id: localId,
+        ...(excludeId ? { id: { [Op.ne]: excludeId } } : {})
+      },
+      transaction
+    });
+    if (!exists) return candidate;
+    i += 1;
+    const suffix = `-${i}`;
+    candidate = `${baseSku.slice(0, 150 - suffix.length)}${suffix}`;
+  }
+}
+
+const ensureUniqueProductSku = async (
+  baseSku,
+  { excludeProductId = null, transaction = null } = {}
+) => {
+  let candidate = baseSku,
+    i = 1;
+  while (true) {
+    const exists = await ProductosModel.findOne({
+      where: {
+        codigo_sku: candidate,
+        ...(excludeProductId ? { id: { [Op.ne]: excludeProductId } } : {})
+      },
+      transaction // <- usa la transacción si viene; Sequelize la ignora si es null
+    });
+    if (!exists) return candidate;
+    i += 1;
+    const suffix = `-${i}`;
+    candidate = `${baseSku.slice(0, 150 - suffix.length)}${suffix}`;
+  }
+};
 
 const StockModel = MD_TB_Stock.StockModel;
 
@@ -360,25 +438,15 @@ export const DISTRIBUIR_Stock_CTS = async (req, res) => {
   }
 };
 
-
-// Función para limpiar nombres (similar al front)
-function slugify(valor) {
-  return String(valor)
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase()
-    .replace(/[^a-z0-9]/g, '-')
-    .replace(/-+$/, '');
-}
-
-
 // Transferir stock (actualizado con código SKU)
 export const TRANSFERIR_Stock_CTS = async (req, res) => {
   const { grupoOriginal, nuevoGrupo, cantidad } = req.body;
   const cantidadNum = Number(cantidad);
 
   if (!grupoOriginal || !nuevoGrupo || isNaN(cantidadNum) || cantidadNum <= 0) {
-    return res.status(400).json({ mensajeError: 'Datos inválidos para transferir stock.' });
+    return res
+      .status(400)
+      .json({ mensajeError: 'Datos inválidos para transferir stock.' });
   }
 
   const transaction = await db.transaction();
@@ -401,14 +469,19 @@ export const TRANSFERIR_Stock_CTS = async (req, res) => {
       where: { stock_id: stockOrigen.id }
     });
     if (ventaAsociada) {
-      throw new Error('El stock original tiene ventas asociadas y no puede transferirse.');
+      throw new Error(
+        'El stock original tiene ventas asociadas y no puede transferirse.'
+      );
     }
 
     const nuevaCantidadOrigen = stockOrigen.cantidad - cantidadNum;
     if (nuevaCantidadOrigen <= 0) {
       await stockOrigen.destroy({ transaction });
     } else {
-      await stockOrigen.update({ cantidad: nuevaCantidadOrigen }, { transaction });
+      await stockOrigen.update(
+        { cantidad: nuevaCantidadOrigen },
+        { transaction }
+      );
     }
 
     const producto = await ProductosModel.findByPk(nuevoGrupo.producto_id);
@@ -456,9 +529,6 @@ export const TRANSFERIR_Stock_CTS = async (req, res) => {
     res.status(500).json({ mensajeError: error.message });
   }
 };
-
-
-
 
 // Elimina TODO el stock del grupo
 export const ER_StockPorGrupo = async (req, res) => {
@@ -545,3 +615,202 @@ export const ER_StockPorGrupo = async (req, res) => {
   }
 };
 
+export const DUPLICAR_Producto_CTS = async (req, res) => {
+  const sourceId = Number(req.params.id);
+  let {
+    nuevoNombre,
+    duplicarStock = true,
+    copiarCantidad = false,
+    locales, // puede venir array o string "1,3,6"
+    generarSku = true
+  } = req.body || {};
+
+  if (!sourceId || !nuevoNombre?.trim()) {
+    return res
+      .status(400)
+      .json({ mensajeError: 'Falta sourceId o nuevoNombre válido.' });
+  }
+
+  // ← opcional: normalizar locales
+  if (typeof locales === 'string') {
+    locales = locales
+      .split(',')
+      .map((x) => Number(x))
+      .filter(Boolean);
+  } else if (Array.isArray(locales)) {
+    locales = [...new Set(locales.map(Number).filter(Boolean))];
+  }
+
+  const t = await db.transaction({
+    isolationLevel: Transaction.ISOLATION_LEVELS.READ_COMMITTED
+  });
+
+  const ensureUniqueSku = async (baseSku, localId, excludeId = null) => {
+    let candidate = baseSku,
+      i = 1;
+    while (true) {
+      const exists = await StockModel.findOne({
+        where: {
+          codigo_sku: candidate,
+          local_id: localId,
+          ...(excludeId ? { id: { [Op.ne]: excludeId } } : {})
+        },
+        transaction: t
+      });
+      if (!exists) return candidate;
+      i += 1;
+      const suffix = `-${i}`;
+      candidate = `${baseSku.slice(0, 150 - suffix.length)}${suffix}`;
+    }
+  };
+
+  try {
+    const prod = await ProductosModel.findByPk(sourceId, { transaction: t });
+    if (!prod) {
+      await t.rollback();
+      return res
+        .status(404)
+        .json({ mensajeError: 'Producto origen no encontrado.' });
+    }
+
+    const precioNum = prod.precio ? Number(prod.precio) : 0;
+    const descNum = prod.descuento_porcentaje
+      ? Number(prod.descuento_porcentaje)
+      : 0;
+    const precioConDesc =
+      descNum > 0
+        ? Number((precioNum - precioNum * (descNum / 100)).toFixed(2))
+        : precioNum;
+
+    // Base: copiar el SKU del producto origen si existe; si no, usar slug del nombre
+    const baseSkuProducto = prod.codigo_sku || slugify(prod.nombre);
+    // Asegurar unicidad a nivel productos
+    const nuevoCodigoSkuProducto = await ensureUniqueProductSku(
+      baseSkuProducto,
+      { transaction: t }
+    );
+    
+    const nuevoProducto = await ProductosModel.create(
+      {
+        nombre: nuevoNombre.trim(),
+        descripcion: prod.descripcion,
+        categoria_id: prod.categoria_id,
+        precio: precioNum,
+        descuento_porcentaje: descNum > 0 ? descNum : null,
+        precio_con_descuento: precioConDesc,
+        imagen_url: prod.imagen_url,
+        estado: prod.estado,
+
+        // 👇 **CLAVE**: SKU del producto nuevo (copiado/normalizado)
+        codigo_sku: nuevoCodigoSkuProducto
+      },
+      { transaction: t }
+    );
+
+    let filasStockCreadas = 0;
+
+    if (duplicarStock) {
+      const whereStock = { producto_id: sourceId };
+
+      // ← opcional: validar y aplicar filtro de locales si viene
+      if (Array.isArray(locales) && locales.length > 0) {
+        // validar existencia de locales
+        const filasLocales = await LocalesModel.findAll({
+          where: { id: { [Op.in]: locales } },
+          attributes: ['id'],
+          transaction: t
+        });
+        const existentes = new Set(filasLocales.map((l) => l.id));
+        const invalidos = locales.filter((id) => !existentes.has(id));
+        if (invalidos.length === locales.length) {
+          await t.rollback();
+          return res.status(400).json({
+            mensajeError: `Ninguno de los locales existe: ${invalidos.join(
+              ', '
+            )}`
+          });
+        }
+        // usar solo los válidos
+        const localesValidos = locales.filter((id) => existentes.has(id));
+        whereStock.local_id = { [Op.in]: localesValidos };
+      }
+
+      const stockOrigen = await StockModel.findAll({
+        where: whereStock,
+        attributes: [
+          'local_id',
+          'lugar_id',
+          'estado_id',
+          'cantidad',
+          'en_exhibicion'
+        ],
+        transaction: t
+      });
+
+      if (stockOrigen.length === 0) {
+        await t.commit();
+        return res.json({
+          message:
+            'Producto duplicado (sin stock copiado por filtro de locales).',
+          nuevo_producto_id: nuevoProducto.id,
+          duplicoStock: false,
+          filasStockCreadas: 0
+        });
+      }
+
+      // insertamos con codigo_sku NULL y después generamos
+      const filas = stockOrigen.map((s) => ({
+        producto_id: nuevoProducto.id,
+        local_id: s.local_id,
+        lugar_id: s.lugar_id,
+        estado_id: s.estado_id,
+        cantidad: copiarCantidad ? Number(s.cantidad || 0) : 0,
+        en_exhibicion: !!s.en_exhibicion,
+        codigo_sku: null
+      }));
+
+      await StockModel.bulkCreate(filas, {
+        transaction: t,
+        ignoreDuplicates: true
+      });
+      filasStockCreadas = filas.length;
+
+      if (generarSku) {
+        const nuevos = await StockModel.findAll({
+          where: { producto_id: nuevoProducto.id },
+          include: [
+            { model: LocalesModel, as: 'locale', attributes: ['nombre'] },
+            { model: LugaresModel, as: 'lugare', attributes: ['nombre'] },
+            { model: EstadosModel, as: 'estado', attributes: ['nombre'] } // opcional
+          ],
+          transaction: t
+        });
+
+        for (const s of nuevos) {
+          const base = buildSku({
+            productoNombre: nuevoProducto.nombre,
+            localNombre: s.locale?.nombre,
+            lugarNombre: s.lugare?.nombre,
+            estadoNombre: s.estado?.nombre // opcional
+          });
+          const unique = await ensureUniqueSku(base, s.local_id, s.id);
+          if (s.codigo_sku !== unique) {
+            await s.update({ codigo_sku: unique }, { transaction: t });
+          }
+        }
+      }
+    }
+
+    await t.commit();
+    return res.json({
+      message: 'Producto duplicado correctamente',
+      nuevo_producto_id: nuevoProducto.id,
+      duplicoStock: !!duplicarStock,
+      filasStockCreadas
+    });
+  } catch (err) {
+    await t.rollback();
+    console.error('❌ Error DUPLICAR_Producto_CTS:', err);
+    return res.status(500).json({ mensajeError: err.message });
+  }
+};

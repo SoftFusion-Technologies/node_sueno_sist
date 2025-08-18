@@ -39,7 +39,6 @@ import {
 } from '../Controllers/Stock/CTS_TB_Productos.js';
 // Importar controladores de productos
 
-
 // Importar controladores de lugares
 import {
   OBRS_Lugares_CTS,
@@ -70,7 +69,8 @@ import {
   ER_StockPorProducto,
   DISTRIBUIR_Stock_CTS,
   TRANSFERIR_Stock_CTS,
-  ER_StockPorGrupo
+  ER_StockPorGrupo,
+  DUPLICAR_Producto_CTS
 } from '../Controllers/Stock/CTS_TB_Stock.js';
 
 // Importar controladores de usuarios
@@ -184,7 +184,10 @@ router.delete('/stock/producto/:id', ER_StockPorProducto);
 router.post('/distribuir', DISTRIBUIR_Stock_CTS);
 router.post('/transferir', TRANSFERIR_Stock_CTS);
 router.post('/eliminar-grupo', ER_StockPorGrupo);
-
+router.post(
+  '/productos/:id/duplicar',
+  /*authMiddleware,*/ DUPLICAR_Producto_CTS
+);
 // ----------------------------------------------------------------
 // Rutas para operaciones CRUD en la tabla 'usuarios'
 // ----------------------------------------------------------------
@@ -539,5 +542,14 @@ import { OBRS_Logs_CTS, OBR_Log_CTS } from '../Controllers/CTS_TB_Logs.js';
 
 router.get('/logs', authenticateToken, OBRS_Logs_CTS);
 router.get('/logs/:id', authenticateToken, OBR_Log_CTS);
+
+import {
+  imprimirEtiquetaTicketDemo,
+  imprimirEtiquetasTicket
+} from '../Controllers/Stock/StockLabelsTicketController.js';
+// Importar controladores de productos
+
+router.get('/stock/etiquetas/ticket/demo', imprimirEtiquetaTicketDemo);
+router.get('/stock/etiquetas/ticket', imprimirEtiquetasTicket);
 
 export default router;
