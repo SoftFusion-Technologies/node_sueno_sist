@@ -138,40 +138,79 @@ export const CR_Producto_CTS = async (req, res) => {
 // Eliminar un producto si no tiene stock
 export const ER_Producto_CTS = async (req, res) => {
   const { id } = req.params;
-  const { usuario_log_id } = req.body; // 👈 Lo recibís igual que en la creación
+  const body = req.body || {}; // 👈 evita destructuring sobre undefined
+  const usuario_log_id = body.usuario_log_id ?? null;
+  const forzado = !!body.forzado;
 
+  const tx = await db.transaction();
   try {
-    const producto = await ProductosModel.findByPk(id);
+    const producto = await ProductosModel.findByPk(id, { transaction: tx });
     if (!producto) {
+      await tx.rollback();
       return res.status(404).json({ mensajeError: 'Producto no encontrado' });
     }
 
-    const tieneStock = await StockModel.findOne({ where: { producto_id: id } });
-    if (tieneStock) {
+    // ¿Tiene stock actualmente?
+    const countStock = await StockModel.count({
+      where: { producto_id: id },
+      transaction: tx
+    });
+
+    // Si tiene stock y NO es forzado => 409
+    if (countStock > 0 && !forzado) {
+      await tx.rollback();
       return res.status(409).json({
         mensajeError:
           'Este PRODUCTO tiene stock asociado. ¿Desea eliminarlo de todas formas incluyendo el stock?'
       });
     }
 
-    await ProductosModel.destroy({ where: { id } });
+    // Si tiene stock y es forzado => borramos stock acá (por si no lo borraron antes)
+    if (countStock > 0 && forzado) {
+      await StockModel.destroy({ where: { producto_id: id }, transaction: tx });
+    }
 
-    const descripcionLog = `eliminó el producto "${producto.nombre}" con SKU "${producto.codigo_sku}"`;
+    await ProductosModel.destroy({ where: { id }, transaction: tx });
 
-    await registrarLog(
-      req,
-      'productos',
-      'eliminar',
-      descripcionLog,
-      usuario_log_id
-    );
+    await tx.commit();
 
-    res.json({ message: 'Producto eliminado correctamente' });
+    // ---- Log fuera de la tx (no romper la respuesta si falla el log) ----
+    try {
+      // (Opcional) obtener nombre del usuario para el texto
+      let quien = `Usuario ${usuario_log_id ?? 'desconocido'}`;
+      try {
+        const u = usuario_log_id
+          ? await UsuariosModel.findByPk(usuario_log_id)
+          : null;
+        if (u?.nombre) quien = u.nombre;
+      } catch {}
+
+      const teniaStock = forzado || countStock > 0;
+      const descripcionLog = `${quien} eliminó el producto "${
+        producto.nombre
+      }" ${teniaStock ? 'que tenía stock ' : ''}(SKU "${producto.codigo_sku}")`;
+
+      await registrarLog(
+        req,
+        'productos',
+        'eliminar',
+        descripcionLog,
+        usuario_log_id
+      );
+    } catch (logErr) {
+      console.warn('registrarLog falló:', logErr?.message || logErr);
+    }
+
+    return res.json({ message: 'Producto eliminado correctamente' });
   } catch (error) {
+    try {
+      await tx.rollback();
+    } catch {}
     console.error('❌ Error en ER_Producto_CTS:', error);
-    res.status(500).json({ mensajeError: error.message });
+    return res.status(500).json({ mensajeError: error.message });
   }
 };
+
 
 // Actualizar un producto
 export const UR_Producto_CTS = async (req, res) => {

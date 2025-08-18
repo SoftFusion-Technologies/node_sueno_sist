@@ -12,15 +12,18 @@
 
 // Importaciones de modelos
 import MD_TB_Stock from '../../Models/Stock/MD_TB_Stock.js';
+const StockModel = MD_TB_Stock.StockModel;
+
 import { ProductosModel } from '../../Models/Stock/MD_TB_Productos.js';
 import { LocalesModel } from '../../Models/Stock/MD_TB_Locales.js';
 import { LugaresModel } from '../../Models/Stock/MD_TB_Lugares.js';
 import { EstadosModel } from '../../Models/Stock/MD_TB_Estados.js';
 import { DetalleVentaModel } from '../../Models/Ventas/MD_TB_DetalleVenta.js';
 import db from '../../DataBase/db.js'; // Esta es tu instancia Sequelize
-import { Op } from 'sequelize';
 import { registrarLog } from '../../Helpers/registrarLog.js';
-import { Transaction } from 'sequelize';
+import { Transaction, Op, Sequelize } from 'sequelize';
+
+const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // Función para limpiar nombres (similar al front)
 export function slugify(valor) {
@@ -99,8 +102,6 @@ const ensureUniqueProductSku = async (
   }
 };
 
-const StockModel = MD_TB_Stock.StockModel;
-
 // Obtener todos los registros de stock con sus relaciones
 export const OBRS_Stock_CTS = async (req, res) => {
   try {
@@ -137,34 +138,207 @@ export const OBR_Stock_CTS = async (req, res) => {
     res.status(500).json({ mensajeError: error.message });
   }
 };
-
-// Crear nuevo registro de stock
 export const CR_Stock_CTS = async (req, res) => {
   try {
-    const { producto_id, local_id, lugar_id, estado_id, usuario_log_id } =
-      req.body;
+    let {
+      producto_id,
+      local_id, // single
+      locales, // bulk (array o "1,3,6")
+      lugar_id,
+      estado_id,
+      cantidad = 0,
+      en_perchero,
+      en_exhibicion,
+      codigo_sku,
+      usuario_log_id,
+      reemplazar = false // true: setea cantidad; false: suma
+    } = req.body || {};
 
-    // Obtener los datos necesarios para descripción
-    const producto = await ProductosModel.findByPk(producto_id);
-    const local = await LocalesModel.findByPk(local_id);
-    const lugar = await LugaresModel.findByPk(lugar_id);
-    const estado = await EstadosModel.findByPk(estado_id);
+    // Normalizar locales
+    if (typeof locales === 'string') {
+      locales = locales.split(',').map(Number).filter(Boolean);
+    } else if (Array.isArray(locales)) {
+      locales = [...new Set(locales.map(Number).filter(Boolean))];
+    }
+    const localesTarget =
+      Array.isArray(locales) && locales.length
+        ? locales
+        : [Number(local_id)].filter(Boolean);
 
-    const codigo_sku = producto?.codigo_sku || `SKU-${producto_id}`;
+    // Validación base
+    if (!producto_id || !lugar_id || !estado_id || localesTarget.length === 0) {
+      return res
+        .status(400)
+        .json({ mensajeError: 'Faltan campos obligatorios.' });
+    }
 
-    // Crear el stock
-    const nuevo = await StockModel.create({ ...req.body, codigo_sku });
+    const showFlag =
+      typeof en_exhibicion === 'boolean'
+        ? en_exhibicion
+        : typeof en_perchero === 'boolean'
+        ? en_perchero
+        : true;
 
-    // Descripción para el log
-    const descripcion = `creó un nuevo stock para el producto "${producto?.nombre}" en el local "${local?.nombre}" (lugar: "${lugar?.nombre}", estado: "${estado?.nombre}")`;
+    // Datos de contexto (fuera de tx por seguridad y porque no cambian aquí)
+    const [producto, lugar, estado] = await Promise.all([
+      ProductosModel.findByPk(producto_id),
+      LugaresModel.findByPk(lugar_id),
+      EstadosModel.findByPk(estado_id)
+    ]);
 
-    // Registrar log
-    await registrarLog(req, 'stock', 'crear', descripcion, usuario_log_id);
+    const baseSku =
+      (codigo_sku || '').trim() ||
+      (producto?.codigo_sku || '').trim() ||
+      `SKU-${producto_id}`;
 
-    res.json({ message: 'Stock creado correctamente', stock: nuevo });
+    // SKU único por (codigo_sku, local_id) SOLO para inserciones
+    const ensureUniqueSku = async (base, locId, t) => {
+      const base150 = (base || `SKU-${producto_id}`).slice(0, 150);
+      let candidate = base150;
+      let i = 1;
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        const exists = await StockModel.findOne({
+          where: { codigo_sku: candidate, local_id: locId },
+          transaction: t
+        });
+        if (!exists) return candidate;
+        i += 1;
+        const suffix = `-${i}`;
+        candidate = `${base150.slice(0, 150 - suffix.length)}${suffix}`;
+      }
+    };
+
+    const creados = [];
+    const actualizados = [];
+
+    // Procesar CADA local en su propia transacción corta + retry
+    for (const locId of localesTarget) {
+      let attempts = 0;
+
+      // reintento para deadlocks o carreras de inserción
+      while (attempts < 3) {
+        attempts += 1;
+        const t = await db.transaction({
+          isolationLevel: Transaction.ISOLATION_LEVELS.READ_COMMITTED
+        });
+
+        try {
+          const whereCombo = {
+            producto_id: Number(producto_id),
+            local_id: Number(locId),
+            lugar_id: Number(lugar_id),
+            estado_id: Number(estado_id)
+          };
+
+          // 1) Buscar sin lock
+          const existente = await StockModel.findOne({
+            where: whereCombo,
+            transaction: t
+          });
+
+          if (existente) {
+            // 2) UPDATE
+            const nuevaCantidad = reemplazar
+              ? Number(cantidad) || 0
+              : Number(existente.cantidad || 0) + (Number(cantidad) || 0);
+
+            await existente.update(
+              {
+                cantidad: nuevaCantidad,
+                en_exhibicion: !!showFlag
+                // NO tocar codigo_sku si ya existe
+              },
+              { transaction: t }
+            );
+
+            await t.commit();
+            actualizados.push(existente);
+            break; // ok para este local
+          }
+
+          // 3) INSERT si no existe (optimista)
+          const finalSku = await ensureUniqueSku(baseSku, Number(locId), t);
+
+          try {
+            const nuevo = await StockModel.create(
+              {
+                ...whereCombo,
+                cantidad: Number(cantidad) || 0,
+                en_exhibicion: !!showFlag,
+                codigo_sku: finalSku
+              },
+              { transaction: t }
+            );
+            await t.commit();
+            creados.push(nuevo);
+            break; // ok para este local
+          } catch (err) {
+            // Si otro proceso insertó en la ventana → ER_DUP_ENTRY: resolvemos como UPDATE
+            if (err?.original?.code === 'ER_DUP_ENTRY') {
+              await t.rollback();
+              // pequeño backoff y reintentar (la próxima iteración encontrará "existente")
+              await delay(30 + Math.floor(Math.random() * 70));
+              continue;
+            }
+            throw err;
+          }
+        } catch (err) {
+          try {
+            await t.rollback();
+          } catch {}
+          // Deadlock: reintentar con backoff
+          if (err?.original?.code === 'ER_LOCK_DEADLOCK' && attempts < 3) {
+            await delay(50 + Math.floor(Math.random() * 100));
+            continue;
+          }
+          // Otros errores: abortar
+          throw err;
+        }
+      }
+    }
+
+    // Log FUERA de tx (no debe romper la operación principal)
+    try {
+      const filasLocales = await LocalesModel.findAll({
+        where: { id: { [Op.in]: localesTarget } },
+        attributes: ['id', 'nombre']
+      });
+      const listaLocales = filasLocales.map((l) => `"${l.nombre}"`).join(', ');
+      const modo = reemplazar
+        ? 'reemplazó'
+        : creados.length
+        ? 'creó'
+        : 'ajustó';
+      const descripcion = `${modo} stock de "${producto?.nombre}" en ${listaLocales} (lugar: "${lugar?.nombre}", estado: "${estado?.nombre}")`;
+
+      await registrarLog(
+        req,
+        'stock',
+        reemplazar ? 'reemplazar' : creados.length ? 'crear' : 'ajustar',
+        descripcion,
+        usuario_log_id
+      );
+    } catch (logErr) {
+      console.warn('registrarLog falló:', logErr?.message || logErr);
+    }
+
+    return res.json({
+      message:
+        creados.length && actualizados.length
+          ? 'Stock creado y actualizado.'
+          : creados.length
+          ? localesTarget.length > 1
+            ? 'Stock creado en los locales seleccionados.'
+            : 'Stock creado correctamente.'
+          : 'Stock actualizado correctamente.',
+      filasCreadas: creados.length,
+      filasActualizadas: actualizados.length,
+      stock: [...creados, ...actualizados]
+    });
   } catch (error) {
     console.error('CR_Stock_CTS:', error);
-    res.status(500).json({ mensajeError: error.message });
+    return res.status(500).json({ mensajeError: error.message });
   }
 };
 
@@ -622,7 +796,12 @@ export const DUPLICAR_Producto_CTS = async (req, res) => {
     duplicarStock = true,
     copiarCantidad = false,
     locales, // puede venir array o string "1,3,6"
-    generarSku = true
+    generarSku = true,
+    // filtros opcionales para acotar QUÉ stock copiar:
+    soloGrupo = false, // true => duplica solo la combinación exacta
+    local_id, // usados si soloGrupo=true
+    lugar_id,
+    estado_id
   } = req.body || {};
 
   if (!sourceId || !nuevoNombre?.trim()) {
@@ -631,12 +810,9 @@ export const DUPLICAR_Producto_CTS = async (req, res) => {
       .json({ mensajeError: 'Falta sourceId o nuevoNombre válido.' });
   }
 
-  // ← opcional: normalizar locales
+  // Normalizar locales (array único de números)
   if (typeof locales === 'string') {
-    locales = locales
-      .split(',')
-      .map((x) => Number(x))
-      .filter(Boolean);
+    locales = locales.split(',').map(Number).filter(Boolean);
   } else if (Array.isArray(locales)) {
     locales = [...new Set(locales.map(Number).filter(Boolean))];
   }
@@ -645,9 +821,39 @@ export const DUPLICAR_Producto_CTS = async (req, res) => {
     isolationLevel: Transaction.ISOLATION_LEVELS.READ_COMMITTED
   });
 
+  // SKU único a nivel PRODUCTOS (para el nuevo producto)
+  const ensureUniqueProductSku = async (
+    baseSku,
+    { excludeProductId = null, transaction = null } = {}
+  ) => {
+    let candidate = (baseSku || '').trim().slice(0, 150);
+    if (!candidate) candidate = 'sku';
+    let i = 1;
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      const exists = await ProductosModel.findOne({
+        where: {
+          codigo_sku: candidate,
+          ...(excludeProductId ? { id: { [Op.ne]: excludeProductId } } : {})
+        },
+        transaction
+      });
+      if (!exists) return candidate;
+      i += 1;
+      const suffix = `-${i}`;
+      candidate = `${(baseSku || 'sku').slice(
+        0,
+        150 - suffix.length
+      )}${suffix}`;
+    }
+  };
+
+  // SKU único por (codigo_sku, local_id) para STOCK
   const ensureUniqueSku = async (baseSku, localId, excludeId = null) => {
-    let candidate = baseSku,
-      i = 1;
+    let candidate = (baseSku || '').trim().slice(0, 150);
+    if (!candidate) candidate = `SKU-${sourceId}`;
+    let i = 1;
+    // eslint-disable-next-line no-constant-condition
     while (true) {
       const exists = await StockModel.findOne({
         where: {
@@ -660,7 +866,10 @@ export const DUPLICAR_Producto_CTS = async (req, res) => {
       if (!exists) return candidate;
       i += 1;
       const suffix = `-${i}`;
-      candidate = `${baseSku.slice(0, 150 - suffix.length)}${suffix}`;
+      candidate = `${(baseSku || `SKU-${sourceId}`).slice(
+        0,
+        150 - suffix.length
+      )}${suffix}`;
     }
   };
 
@@ -682,14 +891,13 @@ export const DUPLICAR_Producto_CTS = async (req, res) => {
         ? Number((precioNum - precioNum * (descNum / 100)).toFixed(2))
         : precioNum;
 
-    // Base: copiar el SKU del producto origen si existe; si no, usar slug del nombre
+    // SKU del producto nuevo (copiado del origen o slug del nombre), único entre productos
     const baseSkuProducto = prod.codigo_sku || slugify(prod.nombre);
-    // Asegurar unicidad a nivel productos
     const nuevoCodigoSkuProducto = await ensureUniqueProductSku(
       baseSkuProducto,
       { transaction: t }
     );
-    
+
     const nuevoProducto = await ProductosModel.create(
       {
         nombre: nuevoNombre.trim(),
@@ -700,8 +908,6 @@ export const DUPLICAR_Producto_CTS = async (req, res) => {
         precio_con_descuento: precioConDesc,
         imagen_url: prod.imagen_url,
         estado: prod.estado,
-
-        // 👇 **CLAVE**: SKU del producto nuevo (copiado/normalizado)
         codigo_sku: nuevoCodigoSkuProducto
       },
       { transaction: t }
@@ -710,31 +916,49 @@ export const DUPLICAR_Producto_CTS = async (req, res) => {
     let filasStockCreadas = 0;
 
     if (duplicarStock) {
+      // -------- 1) Armar filtro de stock a duplicar --------
       const whereStock = { producto_id: sourceId };
 
-      // ← opcional: validar y aplicar filtro de locales si viene
-      if (Array.isArray(locales) && locales.length > 0) {
-        // validar existencia de locales
+      if (soloGrupo) {
+        if (!local_id || !lugar_id || !estado_id) {
+          await t.rollback();
+          return res.status(400).json({
+            mensajeError:
+              'Para soloGrupo faltan local_id, lugar_id y estado_id.'
+          });
+        }
+        Object.assign(whereStock, {
+          local_id: Number(local_id),
+          lugar_id: Number(lugar_id),
+          estado_id: Number(estado_id)
+        });
+      } else if (Array.isArray(locales) && locales.length > 0) {
+        // validar locales recibidos
         const filasLocales = await LocalesModel.findAll({
           where: { id: { [Op.in]: locales } },
           attributes: ['id'],
           transaction: t
         });
         const existentes = new Set(filasLocales.map((l) => l.id));
-        const invalidos = locales.filter((id) => !existentes.has(id));
-        if (invalidos.length === locales.length) {
-          await t.rollback();
-          return res.status(400).json({
-            mensajeError: `Ninguno de los locales existe: ${invalidos.join(
-              ', '
-            )}`
+        const localesValidos = locales.filter((id) => existentes.has(id));
+        if (localesValidos.length === 0) {
+          await t.commit();
+          return res.json({
+            message:
+              'Producto duplicado (sin stock copiado por filtro de locales).',
+            nuevo_producto_id: nuevoProducto.id,
+            duplicoStock: false,
+            filasStockCreadas: 0
           });
         }
-        // usar solo los válidos
-        const localesValidos = locales.filter((id) => existentes.has(id));
         whereStock.local_id = { [Op.in]: localesValidos };
+      } else if (Number(local_id)) {
+        // si vino un local_id suelto, usarlo como filtro
+        whereStock.local_id = Number(local_id);
       }
+      // si no vino nada → duplica TODO el stock del producto (todos los locales)
 
+      // -------- 2) Leer origen --------
       const stockOrigen = await StockModel.findAll({
         where: whereStock,
         attributes: [
@@ -751,14 +975,14 @@ export const DUPLICAR_Producto_CTS = async (req, res) => {
         await t.commit();
         return res.json({
           message:
-            'Producto duplicado (sin stock copiado por filtro de locales).',
+            'Producto duplicado (sin stock en origen para los filtros dados).',
           nuevo_producto_id: nuevoProducto.id,
           duplicoStock: false,
           filasStockCreadas: 0
         });
       }
 
-      // insertamos con codigo_sku NULL y después generamos
+      // -------- 3) Insertar filas de stock (SKU luego) --------
       const filas = stockOrigen.map((s) => ({
         producto_id: nuevoProducto.id,
         local_id: s.local_id,
@@ -775,24 +999,19 @@ export const DUPLICAR_Producto_CTS = async (req, res) => {
       });
       filasStockCreadas = filas.length;
 
+      // -------- 4) Generar SKUs de stock con base del PRODUCTO --------
       if (generarSku) {
         const nuevos = await StockModel.findAll({
           where: { producto_id: nuevoProducto.id },
-          include: [
-            { model: LocalesModel, as: 'locale', attributes: ['nombre'] },
-            { model: LugaresModel, as: 'lugare', attributes: ['nombre'] },
-            { model: EstadosModel, as: 'estado', attributes: ['nombre'] } // opcional
-          ],
+          attributes: ['id', 'local_id', 'codigo_sku'],
           transaction: t
         });
 
         for (const s of nuevos) {
-          const base = buildSku({
-            productoNombre: nuevoProducto.nombre,
-            localNombre: s.locale?.nombre,
-            lugarNombre: s.lugare?.nombre,
-            estadoNombre: s.estado?.nombre // opcional
-          });
+          const base =
+            nuevoProducto.codigo_sku ||
+            prod.codigo_sku ||
+            slugify(nuevoProducto.nombre);
           const unique = await ensureUniqueSku(base, s.local_id, s.id);
           if (s.codigo_sku !== unique) {
             await s.update({ codigo_sku: unique }, { transaction: t });
@@ -809,7 +1028,9 @@ export const DUPLICAR_Producto_CTS = async (req, res) => {
       filasStockCreadas
     });
   } catch (err) {
-    await t.rollback();
+    try {
+      await t.rollback();
+    } catch {}
     console.error('❌ Error DUPLICAR_Producto_CTS:', err);
     return res.status(500).json({ mensajeError: err.message });
   }
