@@ -16,6 +16,8 @@ import { CategoriasModel } from '../../Models/Stock/MD_TB_Categorias.js';
 import { StockModel } from '../../Models/Stock/MD_TB_Stock.js';
 import db from '../../DataBase/db.js';
 import axios from 'axios';
+import { Op } from 'sequelize';
+
 import { registrarLog } from '../../Helpers/registrarLog.js';
 // Obtener todos los productos con categoría incluida
 export const OBRS_Productos_CTS = async (req, res) => {
@@ -211,7 +213,6 @@ export const ER_Producto_CTS = async (req, res) => {
   }
 };
 
-
 // Actualizar un producto
 export const UR_Producto_CTS = async (req, res) => {
   const { id } = req.params;
@@ -315,38 +316,90 @@ export const UR_Producto_CTS = async (req, res) => {
 };
 
 // Aumentar o disminuir precios por porcentaje (global o por categoría)
+// Aumentar o disminuir precios por porcentaje (global o por categoría)
 export const AUM_Productos_Porcentaje_CTS = async (req, res) => {
   const { porcentaje, categorias, usarInflacion, usuario_log_id } = req.body;
 
   try {
     let porcentajeNum;
+    let inflacionMeta = null;
 
     if (usarInflacion) {
-      const response = await axios.get(
-        'https://api.argentinadatos.com/v1/finanzas/indices/inflacion'
-      );
-
-      const inflaciones = response.data;
-      const hoy = new Date();
-      const mesActual = hoy.getMonth() + 1;
-      const anioActual = hoy.getFullYear();
-
-      const inflacionActual = inflaciones.find((i) => {
-        const fecha = new Date(i.fecha);
-        return (
-          fecha.getMonth() + 1 === mesActual &&
-          fecha.getFullYear() === anioActual
+      // --- 1) Traer datos de inflación ---
+      let response;
+      try {
+        response = await axios.get(
+          'https://api.argentinadatos.com/v1/finanzas/indices/inflacion',
+          { timeout: 10000 } // 10s por si la API está lenta
         );
-      });
-
-      if (!inflacionActual) {
-        return res.status(404).json({
-          mensajeError: 'No se encontró el valor de inflación del mes actual.'
+      } catch (e) {
+        return res.status(502).json({
+          mensajeError: 'No se pudo consultar la API de inflación.',
+          detalle: e.message
         });
       }
 
-      porcentajeNum = parseFloat(inflacionActual.valor);
+      const inflaciones = Array.isArray(response.data) ? response.data : [];
+      if (!inflaciones.length) {
+        return res.status(502).json({
+          mensajeError: 'La API de inflación no devolvió datos.'
+        });
+      }
+
+      // Normalizar a objetos confiables
+      const rows = inflaciones
+        .map((i) => ({
+          rawFecha: i.fecha,
+          fecha: new Date(i.fecha), // suelen venir como fin de mes
+          valor: Number(i.valor)
+        }))
+        .filter((r) => !isNaN(r.fecha.getTime()) && !isNaN(r.valor));
+
+      if (!rows.length) {
+        return res.status(502).json({
+          mensajeError: 'No hay filas de inflación válidas.'
+        });
+      }
+
+      // Utilidades
+      const yyyymm = (d) =>
+        `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+
+      const hoy = new Date();
+      const currentYm = yyyymm(hoy);
+
+      const prev = new Date(hoy.getFullYear(), hoy.getMonth() - 1, 1);
+      const prevYm = yyyymm(prev);
+
+      // --- 2) Selección del mes a usar ---
+      // a) Intentar mes actual
+      let elegido = rows.find((r) => yyyymm(r.fecha) === currentYm);
+
+      // b) Si no, mes anterior
+      if (!elegido) {
+        elegido = rows.find((r) => yyyymm(r.fecha) === prevYm);
+      }
+
+      // c) Si no, último disponible por fecha (máxima)
+      if (!elegido) {
+        elegido = rows.sort((a, b) => b.fecha - a.fecha)[0];
+      }
+
+      if (!elegido) {
+        return res.status(502).json({
+          mensajeError:
+            'No fue posible determinar un valor de inflación válido.'
+        });
+      }
+
+      porcentajeNum = elegido.valor;
+      inflacionMeta = {
+        mes_usado: yyyymm(elegido.fecha), // p.ej. "2025-07"
+        fecha_origen: elegido.rawFecha, // p.ej. "2025-07-31"
+        fuente: 'api.argentinadatos.com/v1/finanzas/indices/inflacion'
+      };
     } else {
+      // Porcentaje manual
       porcentajeNum = parseFloat(porcentaje);
       if (isNaN(porcentajeNum)) {
         return res
@@ -355,8 +408,8 @@ export const AUM_Productos_Porcentaje_CTS = async (req, res) => {
       }
     }
 
+    // --- 3) Factor multiplicador ---
     const factor = 1 + porcentajeNum / 100;
-
     if (factor <= 0) {
       return res.status(400).json({
         mensajeError:
@@ -364,21 +417,29 @@ export const AUM_Productos_Porcentaje_CTS = async (req, res) => {
       });
     }
 
-    const whereClause = categorias?.length ? { categoria_id: categorias } : {};
+    // --- 4) Filtro por categorías (si vienen) ---
+    let whereClause = {};
+    if (categorias?.length) {
+      // Asegurar números (por si vienen como string)
+      const cats = categorias.map((c) => Number(c)).filter((n) => !isNaN(n));
+      if (cats.length) {
+        whereClause = { categoria_id: { [Op.in]: cats } };
+      }
+    }
 
+    // --- 5) Traer productos y actualizar ---
     const productos = await ProductosModel.findAll({ where: whereClause });
 
     const actualizados = [];
-
     for (const p of productos) {
-      const nuevoPrecio = parseFloat((p.precio * factor).toFixed(2));
+      const precioActual = Number(p.precio) || 0;
+      const descuentoPct = Number(p.descuento_porcentaje) || 0;
+
+      const nuevoPrecio = parseFloat((precioActual * factor).toFixed(2));
       const nuevoPrecioConDescuento =
-        p.descuento_porcentaje && p.descuento_porcentaje > 0
+        descuentoPct > 0
           ? parseFloat(
-              (
-                nuevoPrecio -
-                nuevoPrecio * (p.descuento_porcentaje / 100)
-              ).toFixed(2)
+              (nuevoPrecio - nuevoPrecio * (descuentoPct / 100)).toFixed(2)
             )
           : nuevoPrecio;
 
@@ -393,15 +454,16 @@ export const AUM_Productos_Porcentaje_CTS = async (req, res) => {
       actualizados.push({
         id: p.id,
         nombre: p.nombre,
-        precio_anterior: parseFloat(p.precio),
+        precio_anterior: precioActual,
         precio_nuevo: nuevoPrecio,
-        descuento_porcentaje: p.descuento_porcentaje ?? 0,
+        descuento_porcentaje: descuentoPct,
         precio_con_descuento: nuevoPrecioConDescuento
       });
     }
 
+    // --- 6) Guardar estado temporal para "deshacer" ---
     const now = new Date();
-    const expiresAt = new Date(now.getTime() + 5 * 60 * 1000);
+    const expiresAt = new Date(now.getTime() + 5 * 60 * 1000); // 5 min
 
     await db.query(
       `INSERT INTO ajustes_precios_temp (productos, expires_at) VALUES (:productos, :expires_at)`,
@@ -414,23 +476,28 @@ export const AUM_Productos_Porcentaje_CTS = async (req, res) => {
     );
 
     const [ajusteRow] = await db.query(`SELECT LAST_INSERT_ID() as ajuste_id`);
-    const ajuste_id = ajusteRow[0].ajuste_id;
+    const ajuste_id = Array.isArray(ajusteRow)
+      ? ajusteRow[0]?.ajuste_id
+      : ajusteRow?.ajuste_id;
 
-    // 👇 REGISTRAR LOG
-    const logDescripcion = `aplicó un ajuste de precios del ${porcentajeNum}% a ${
-      actualizados.length
-    } producto(s). Origen: ${usarInflacion ? 'inflacion' : 'manual'}.
-Ejemplo de cambios:
-${actualizados
-  .slice(0, 5)
-  .map(
-    (p) =>
-      `• "${p.nombre}": precio de $${p.precio_anterior} → $${p.precio_nuevo}` +
-      (p.descuento_porcentaje && p.descuento_porcentaje > 0
-        ? ` | con ${p.descuento_porcentaje}% OFF queda en $${p.precio_con_descuento}`
-        : '')
-  )
-  .join('\n')}${actualizados.length > 5 ? '\n...y más' : ''}`;
+    // --- 7) Registrar log (incluye metadato de inflación si aplica) ---
+    const origenTxt = usarInflacion
+      ? `inflación (${inflacionMeta?.mes_usado ?? 'N/D'})`
+      : 'manual';
+    const logDescripcion =
+      `aplicó un ajuste de precios del ${porcentajeNum}% a ${actualizados.length} producto(s). ` +
+      `Origen: ${origenTxt}.\nEjemplo de cambios:\n` +
+      actualizados
+        .slice(0, 5)
+        .map(
+          (p) =>
+            `• "${p.nombre}": precio de $${p.precio_anterior} → $${p.precio_nuevo}` +
+            (p.descuento_porcentaje > 0
+              ? ` | con ${p.descuento_porcentaje}% OFF queda en $${p.precio_con_descuento}`
+              : '')
+        )
+        .join('\n') +
+      (actualizados.length > 5 ? '\n...y más' : '');
 
     await registrarLog(
       req,
@@ -440,12 +507,14 @@ ${actualizados
       usuario_log_id
     );
 
+    // --- 8) Respuesta ---
     return res.json({
       message: `Se actualizaron ${actualizados.length} productos usando un ajuste del ${porcentajeNum}%.`,
       actualizados,
       ajuste_id,
       porcentaje_aplicado: porcentajeNum,
-      origen: usarInflacion ? 'inflacion' : 'manual'
+      origen: usarInflacion ? 'inflacion' : 'manual',
+      inflacion_meta: inflacionMeta
     });
   } catch (error) {
     console.error('❌ Error en AUM_Productos_Porcentaje_CTS:', error);

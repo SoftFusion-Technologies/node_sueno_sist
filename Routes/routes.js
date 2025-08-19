@@ -128,27 +128,23 @@ router.put('/locales/:id', UR_Local_CTS);
 // ----------------------------------------------------------------
 // Rutas para operaciones CRUD en la tabla 'productos'
 // ----------------------------------------------------------------
-
-// Obtener todos los productos
-router.get('/productos', OBRS_Productos_CTS);
-
-// Obtener un producto por ID
-router.get('/productos/:id', OBR_Producto_CTS);
-
-// Crear un nuevo producto
-router.post('/productos', CR_Producto_CTS);
-
-// Eliminar un producto
-router.delete('/productos/:id', ER_Producto_CTS);
-
-// Actualizar un producto
-router.put('/productos/:id', UR_Producto_CTS);
-
-router.post('/productos/aumentar-precio', AUM_Productos_Porcentaje_CTS);
+// ----------------------------------------------------------------
+// Rutas específicas (acciones de negocio)
+// ----------------------------------------------------------------
+router.post('/aumentar-precio', AUM_Productos_Porcentaje_CTS);
 router.post('/productos/deshacer-ajuste', DESH_DeshacerAjustePrecios_CTS);
 
 router.post('/aplicar-descuento', AUM_Productos_Descuento_CTS);
 router.post('/deshacer-descuento', DESH_DeshacerDescuento_CTS);
+
+// ----------------------------------------------------------------
+// CRUD 'productos'
+// ----------------------------------------------------------------
+router.get('/productos', OBRS_Productos_CTS);
+router.get('/productos/:id', OBR_Producto_CTS);
+router.post('/productos', CR_Producto_CTS);
+router.put('/productos/:id', UR_Producto_CTS);
+router.delete('/productos/:id', ER_Producto_CTS);
 
 // ----------------------------------------------------------------
 // Rutas para operaciones CRUD en la tabla 'Lugares'

@@ -25,6 +25,52 @@ import { DetalleDevolucionModel } from '../../Models/Ventas/MD_TB_DetalleDevoluc
 import { ComboVentaLogModel } from '../../Models/Combos/MD_TB_ComboVentaLog.js';
 import { DetalleVentaCombosModel } from '../../Models/Combos/MD_TB_DetalleVentaCombos.js';
 import { ComboProductosPermitidosModel } from '../../Models/Combos/MD_TB_ComboProductosPermitidos.js';
+
+const WIDTHS_SKU = {
+  prod: 5,
+  local: 3,
+  lugar: 3,
+  estado: 2,
+  check: 2
+}; // total = 18
+const checksum97 = (digits) => {
+  let rem = 0;
+  for (let i = 0; i < digits.length; i++) {
+    const d = digits.charCodeAt(i) - 48; // '0'..'9'
+    if (d < 0 || d > 9) continue;
+    rem = (rem * 10 + d) % 97;
+  }
+  return String(rem).padStart(WIDTHS_SKU.check, '0');
+};
+function decodeNumericSku(sku18) {
+  const clean = String(sku18 || '').replace(/\D/g, '');
+  const total =
+    WIDTHS_SKU.prod +
+    WIDTHS_SKU.local +
+    WIDTHS_SKU.lugar +
+    WIDTHS_SKU.estado +
+    WIDTHS_SKU.check; // 18
+  if (clean.length !== total)
+    throw new Error('SKU numérico inválido: longitud');
+  const core = clean.slice(0, -WIDTHS_SKU.check);
+  const chk = clean.slice(-WIDTHS_SKU.check);
+  if (checksum97(core) !== chk)
+    throw new Error('SKU numérico inválido: checksum');
+
+  let off = 0;
+  const take = (w) => {
+    const s = core.slice(off, off + w);
+    off += w;
+    return Number(s);
+  };
+  return {
+    producto_id: take(WIDTHS_SKU.prod),
+    local_id: take(WIDTHS_SKU.local),
+    lugar_id: take(WIDTHS_SKU.lugar),
+    estado_id: take(WIDTHS_SKU.estado)
+  };
+}
+
 /** 1. Búsqueda simple por SKU o nombre, sin agrupación (detalle por talle) */
 export const buscarItemsVenta = async (req, res) => {
   const { query } = req.query;
@@ -117,7 +163,9 @@ export const buscarItemsVentaAgrupado = async (req, res) => {
 /** 3. Búsqueda detallada con talles y stock para selección exacta */
 export const buscarItemsVentaDetallado = async (req, res) => {
   const { query, combo_id } = req.query;
-  const isNumeric = query && !isNaN(Number(query));
+  const isNumeric = query && !isNaN(Number(query)); // <- se mantiene tal cual
+  const q = String(query ?? '').trim();
+  const isNumericSku = /^\d{15}$/.test(q); // <- NUEVO: detecta nuestro código
 
   try {
     let productosPermitidos = [];
@@ -137,16 +185,32 @@ export const buscarItemsVentaDetallado = async (req, res) => {
         .map((p) => p.categoria_id);
     }
 
-    let whereStock = {
-      cantidad: { [Op.gt]: 0 },
-      [Op.or]: [
+    // Base con stock disponible
+    let whereStock = { cantidad: { [Op.gt]: 0 } };
+
+    if (isNumericSku) {
+      // 🔹 NUEVO: búsqueda exacta por combinación de IDs decodificada
+      try {
+        const ids = decodeNumericSku(q);
+        Object.assign(whereStock, {
+          producto_id: ids.producto_id,
+          local_id: ids.local_id,
+          lugar_id: ids.lugar_id,
+          estado_id: ids.estado_id
+        });
+      } catch {
+        return res.json([]); // código inválido (longitud/checksum)
+      }
+    } else {
+      // 🔸 Comportamiento actual (sin cambios)
+      whereStock[Op.or] = [
         { codigo_sku: { [Op.like]: `%${query}%` } },
         { '$producto.nombre$': { [Op.like]: `%${query}%` } },
         ...(isNumeric
           ? [{ '$producto.id$': Number(query) }, { id: Number(query) }]
           : [])
-      ]
-    };
+      ];
+    }
 
     if (
       combo_id &&
@@ -176,11 +240,6 @@ export const buscarItemsVentaDetallado = async (req, res) => {
             'precio_con_descuento',
             'categoria_id'
           ]
-        },
-        {
-          model: TallesModel,
-          as: 'talle',
-          attributes: ['id', 'nombre']
         }
       ],
       limit: 50
@@ -197,8 +256,6 @@ export const buscarItemsVentaDetallado = async (req, res) => {
       precio_con_descuento: s.producto.precio_con_descuento
         ? parseFloat(s.producto.precio_con_descuento)
         : parseFloat(s.producto.precio),
-      talle_id: s.talle_id,
-      talle_nombre: s.talle?.nombre || 'Sin talle',
       cantidad_disponible: s.cantidad,
       codigo_sku: s.codigo_sku,
       categoria_id: s.producto.categoria_id
