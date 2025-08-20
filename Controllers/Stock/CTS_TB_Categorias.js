@@ -9,12 +9,13 @@
  *   • OBR_Categoria_CTS  : agrega cantidadProductos
  *   • ER_Categoria_CTS   : bloquea/forza eliminación si hay productos
  */
+import db from '../../DataBase/db.js';
+import { fn, col, Transaction } from 'sequelize';
 
-import { fn, col } from 'sequelize';
 import { CategoriasModel } from '../../Models/Stock/MD_TB_Categorias.js';
 import { ProductosModel } from '../../Models/Stock/MD_TB_Productos.js'; // ⬅️ tu modelo de productos
 import { registrarLog } from '../../Helpers/registrarLog.js';
-
+import { ComboProductosPermitidosModel } from '../../Models/Combos/MD_TB_ComboProductosPermitidos.js';
 /* =========================================================================
  * 1) Obtener TODAS las categorías + cantidad de productos
  *    GET /categorias
@@ -163,66 +164,109 @@ export const UR_Categoria_CTS = async (req, res) => {
  * 5) Eliminar categoría con protección FORZAR
  *    DELETE /categorias/:id?forzar=true
  * =======================================================================*/
+// Eliminar una categoría (con chequeo de FK en productos y combos + forzado + log)
+// Eliminar categoría con manejo de dependencias (productos y combos) y sin reusar tx tras rollback
 export const ER_Categoria_CTS = async (req, res) => {
-  const { id } = req.params;
-  const { forzar } = req.query;
-  const { usuario_log_id } = req.body;
+  const id = Number(req.params.id);
+  const body = req.body || {};
+  const usuario_log_id = body.usuario_log_id ?? req.query.usuario_log_id ?? null;
 
-  console.log('usuariooo', usuario_log_id);
+  // Aceptar forzado desde body o query
+  const rawForzado = body.forzado ?? body.forzar ?? req.query.forzar ?? 'false';
+  const forzado =
+    rawForzado === true ||
+    rawForzado === 'true' ||
+    rawForzado === 1 ||
+    rawForzado === '1';
+
   try {
     const categoria = await CategoriasModel.findByPk(id);
     if (!categoria) {
       return res.status(404).json({ mensajeError: 'Categoría no encontrada' });
     }
 
-    const tieneProductos = await ProductosModel.findOne({
-      where: { categoria_id: id }
-    });
+    // 1) Chequeos SIN transacción
+    const [countProd, countCPP] = await Promise.all([
+      ProductosModel.count({ where: { categoria_id: id } }),
+      ComboProductosPermitidosModel.count({ where: { categoria_id: id } })
+    ]);
 
-    // Si tiene productos y NO se fuerza, abortamos
-    if (tieneProductos && !forzar) {
+    if ((countProd > 0 || countCPP > 0) && !forzado) {
+      // Aviso específico según la causa
+      const partes = [];
+      if (countProd > 0) partes.push('tiene productos asociados');
+      if (countCPP > 0) partes.push('está usada en uno o más combos');
+      const detalle = partes.join(' y ');
       return res.status(409).json({
-        mensajeError:
-          'Esta CATEGORÍA tiene productos asociados. ¿Desea eliminarla de todas formas?'
+        mensajeError: `Esta CATEGORÍA ${detalle}. ¿Desea eliminarla de todas formas?`
       });
     }
 
-    // Si tiene productos y se fuerza, desvinculamos
-    if (tieneProductos && forzar) {
-      await ProductosModel.update(
-        { categoria_id: null },
-        { where: { categoria_id: id } }
-      );
+    // 2) Camino sin referencias => delete directo (sin transacción)
+    if (countProd === 0 && countCPP === 0) {
+      await CategoriasModel.destroy({ where: { id } });
+    } else {
+      // 3) Camino forzado => abrir transacción SOLO acá
+      const t = await db.transaction({
+        isolationLevel: Transaction.ISOLATION_LEVELS.READ_COMMITTED
+      });
+      try {
+        // Quitarla de combos permitidos si existe
+        if (countCPP > 0) {
+          await ComboProductosPermitidosModel.destroy({
+            where: { categoria_id: id },
+            transaction: t
+          });
+        }
+
+        // Desvincular productos si corresponde
+        if (countProd > 0) {
+          await ProductosModel.update(
+            { categoria_id: null },
+            { where: { categoria_id: id }, transaction: t }
+          );
+        }
+
+        // Borrar la categoría
+        await CategoriasModel.destroy({ where: { id }, transaction: t });
+
+        await t.commit();
+      } catch (err) {
+        try {
+          await t.rollback();
+        } catch {}
+        throw err;
+      }
     }
 
-    const eliminado = await CategoriasModel.destroy({ where: { id } });
-
-    if (!eliminado) {
-      return res.status(404).json({ mensajeError: 'Categoría no encontrada' });
+    // 4) Log FUERA de transacción (no debe afectar la respuesta)
+    try {
+      if (usuario_log_id) {
+        const partes = [];
+        if (countProd > 0) partes.push(`${countProd} producto(s) desvinculados`);
+        if (countCPP > 0) partes.push(`removida de ${countCPP} combo(s)`);
+        const sufijo = partes.length ? ` (${partes.join(', ')})` : '';
+        await registrarLog(
+          req,
+          'categorias',
+          'eliminar',
+          `eliminó la categoría "${categoria.nombre}"${sufijo}`,
+          usuario_log_id
+        );
+      }
+    } catch (logErr) {
+      console.warn('registrarLog falló:', logErr?.message || logErr);
     }
 
-    // Log de auditoría (solo si hay usuario_log_id)
-    if (usuario_log_id) {
-      const descripcion = tieneProductos
-        ? `eliminó la categoría "${categoria.nombre}" y desvinculó productos asociados`
-        : `eliminó la categoría "${categoria.nombre}"`;
-
-      await registrarLog(
-        req,
-        'categorias',
-        'eliminar',
-        descripcion,
-        usuario_log_id
-      );
-    }
-
-    res.json({
-      message: tieneProductos
-        ? 'Categoría eliminada y productos desvinculados.'
-        : 'Categoría eliminada correctamente.'
+    return res.json({
+      message:
+        countProd > 0 || countCPP > 0
+          ? 'Categoría eliminada (se removieron referencias).'
+          : 'Categoría eliminada correctamente.'
     });
   } catch (error) {
-    console.error('ER_Categoria_CTS - Error interno:', error);
-    res.status(500).json({ mensajeError: error.message });
+    console.error('ER_Categoria_CTS:', error);
+    return res.status(500).json({ mensajeError: error.message });
   }
 };
+

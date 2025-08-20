@@ -17,7 +17,7 @@ import { StockModel } from '../../Models/Stock/MD_TB_Stock.js';
 import db from '../../DataBase/db.js';
 import axios from 'axios';
 import { Op } from 'sequelize';
-
+import { ComboProductosPermitidosModel } from '../../Models/Combos/MD_TB_ComboProductosPermitidos.js';
 import { registrarLog } from '../../Helpers/registrarLog.js';
 // Obtener todos los productos con categoría incluida
 export const OBRS_Productos_CTS = async (req, res) => {
@@ -138,9 +138,10 @@ export const CR_Producto_CTS = async (req, res) => {
 };
 
 // Eliminar un producto si no tiene stock
+// Controllers/Stock/CTS_TB_Productos.js
 export const ER_Producto_CTS = async (req, res) => {
   const { id } = req.params;
-  const body = req.body || {}; // 👈 evita destructuring sobre undefined
+  const body = req.body || {};
   const usuario_log_id = body.usuario_log_id ?? null;
   const forzado = !!body.forzado;
 
@@ -152,33 +153,47 @@ export const ER_Producto_CTS = async (req, res) => {
       return res.status(404).json({ mensajeError: 'Producto no encontrado' });
     }
 
-    // ¿Tiene stock actualmente?
+    // 1) ¿El producto está en combos?
+    const countEnCombos = await ComboProductosPermitidosModel.count({
+      where: { producto_id: id },
+      transaction: tx
+    });
+    if (countEnCombos > 0) {
+      await tx.rollback();
+      return res.status(409).json({
+        mensajeError:
+          'No es posible borrar el producto porque está asignado a uno o más combos. ' +
+          'Primero elimínalo de esos combos y luego podrás borrarlo.',
+        reason: 'FK_COMBO',
+        combos_count: countEnCombos
+      });
+    }
+
+    // 2) ¿Tiene stock?
     const countStock = await StockModel.count({
       where: { producto_id: id },
       transaction: tx
     });
 
-    // Si tiene stock y NO es forzado => 409
     if (countStock > 0 && !forzado) {
       await tx.rollback();
       return res.status(409).json({
         mensajeError:
-          'Este PRODUCTO tiene stock asociado. ¿Desea eliminarlo de todas formas incluyendo el stock?'
+          'Este PRODUCTO tiene stock asociado. ¿Desea eliminarlo de todas formas incluyendo el stock?',
+        reason: 'HAS_STOCK',
+        stock_count: countStock
       });
     }
 
-    // Si tiene stock y es forzado => borramos stock acá (por si no lo borraron antes)
     if (countStock > 0 && forzado) {
       await StockModel.destroy({ where: { producto_id: id }, transaction: tx });
     }
 
     await ProductosModel.destroy({ where: { id }, transaction: tx });
-
     await tx.commit();
 
-    // ---- Log fuera de la tx (no romper la respuesta si falla el log) ----
+    // ---- Log fuera de la tx ----
     try {
-      // (Opcional) obtener nombre del usuario para el texto
       let quien = `Usuario ${usuario_log_id ?? 'desconocido'}`;
       try {
         const u = usuario_log_id
@@ -188,9 +203,9 @@ export const ER_Producto_CTS = async (req, res) => {
       } catch {}
 
       const teniaStock = forzado || countStock > 0;
-      const descripcionLog = `${quien} eliminó el producto "${
-        producto.nombre
-      }" ${teniaStock ? 'que tenía stock ' : ''}(SKU "${producto.codigo_sku}")`;
+      const descripcionLog = `${quien} eliminó el producto "${producto.nombre}" ${
+        teniaStock ? 'que tenía stock ' : ''
+      }(SKU "${producto.codigo_sku}")`;
 
       await registrarLog(
         req,
@@ -205,13 +220,24 @@ export const ER_Producto_CTS = async (req, res) => {
 
     return res.json({ message: 'Producto eliminado correctamente' });
   } catch (error) {
-    try {
-      await tx.rollback();
-    } catch {}
+    // fallback por si en el medio falla por FK:
+    if (
+      error?.parent?.code === 'ER_ROW_IS_REFERENCED_2' ||
+      error?.original?.code === 'ER_ROW_IS_REFERENCED_2'
+    ) {
+      return res.status(409).json({
+        mensajeError:
+          'No es posible borrar el producto porque está asignado a uno o más combos. ' +
+          'Primero elimínalo de esos combos y luego podrás borrarlo.',
+        reason: 'FK_COMBO'
+      });
+    }
+    try { await tx.rollback(); } catch {}
     console.error('❌ Error en ER_Producto_CTS:', error);
     return res.status(500).json({ mensajeError: error.message });
   }
 };
+
 
 // Actualizar un producto
 export const UR_Producto_CTS = async (req, res) => {
@@ -315,7 +341,6 @@ export const UR_Producto_CTS = async (req, res) => {
   }
 };
 
-// Aumentar o disminuir precios por porcentaje (global o por categoría)
 // Aumentar o disminuir precios por porcentaje (global o por categoría)
 export const AUM_Productos_Porcentaje_CTS = async (req, res) => {
   const { porcentaje, categorias, usarInflacion, usuario_log_id } = req.body;
