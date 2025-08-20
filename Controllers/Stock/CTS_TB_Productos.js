@@ -328,7 +328,7 @@ export const UR_Producto_CTS = async (req, res) => {
       await registrarLog(
         req,
         'productos',
-        'actualizar',
+        'editar',
         descripcionLog,
         usuario_log_id
       );
