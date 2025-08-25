@@ -163,9 +163,9 @@ export const buscarItemsVentaAgrupado = async (req, res) => {
 /** 3. Búsqueda detallada con talles y stock para selección exacta */
 export const buscarItemsVentaDetallado = async (req, res) => {
   const { query, combo_id } = req.query;
-  const isNumeric = query && !isNaN(Number(query)); // <- se mantiene tal cual
   const q = String(query ?? '').trim();
-  const isNumericSku = /^\d{15}$/.test(q); // <- NUEVO: detecta nuestro código
+  const isNumeric = q && !isNaN(Number(q));
+  const isNumericSku = /^\d{15}$/.test(q);
 
   try {
     let productosPermitidos = [];
@@ -175,39 +175,45 @@ export const buscarItemsVentaDetallado = async (req, res) => {
       const permitidos = await ComboProductosPermitidosModel.findAll({
         where: { combo_id }
       });
-
       productosPermitidos = permitidos
         .filter((p) => p.producto_id)
         .map((p) => p.producto_id);
-
       categoriasPermitidas = permitidos
         .filter((p) => p.categoria_id)
         .map((p) => p.categoria_id);
     }
 
-    // Base con stock disponible
-    let whereStock = { cantidad: { [Op.gt]: 0 } };
+    // 🚩 nuevo: tomar local_id si viene por query
+    const localId = Number(req.query.local_id || 0);
+    console.log("locaaaal",localId)
+    // Base con stock disponible (+ local si viene)
+    let whereStock = {
+      cantidad: { [Op.gt]: 0 },
+      ...(localId ? { local_id: localId } : {})
+    };
 
     if (isNumericSku) {
-      // 🔹 NUEVO: búsqueda exacta por combinación de IDs decodificada
+      // Búsqueda exacta por SKU decodificado
       try {
         const ids = decodeNumericSku(q);
         Object.assign(whereStock, {
           producto_id: ids.producto_id,
-          local_id: ids.local_id,
           lugar_id: ids.lugar_id,
           estado_id: ids.estado_id
+          // 👇 y dejamos el local forzado si vino por query
+          // si NO vino local_id, podés opcionalmente setear:
+          // ...(localId ? {} : { local_id: ids.local_id })
         });
       } catch {
-        return res.json([]); // código inválido (longitud/checksum)
+        return res.json([]); // código inválido
       }
     } else {
-      // 🔸 Comportamiento actual (sin cambios)
+      // Búsqueda por texto / id
       whereStock[Op.or] = [
-        { codigo_sku: { [Op.like]: `%${query}%` } },
-        { '$producto.nombre$': { [Op.like]: `%${query}%` } },
+        { codigo_sku: { [Op.like]: `%${q}%` } }, // 👈 usar q
+        { '$producto.nombre$': { [Op.like]: `%${q}%` } }, // 👈 usar q
         ...(isNumeric
-          ? [{ '$producto.id$': Number(query) }, { id: Number(query) }]
+          ? [{ '$producto.id$': Number(q) }, { id: Number(q) }]
           : [])
       ];
     }
@@ -267,6 +273,7 @@ export const buscarItemsVentaDetallado = async (req, res) => {
     res.status(500).json({ message: 'Error en búsqueda detallada' });
   }
 };
+
 
 // Registrar una venta completa
 export const registrarVenta = async (req, res) => {
