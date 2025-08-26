@@ -167,6 +167,9 @@ export const buscarItemsVentaDetallado = async (req, res) => {
   const isNumeric = q && !isNaN(Number(q));
   const isNumericSku = /^\d{15}$/.test(q);
 
+  const localId = Number(req.query.local_id || 0);
+  const includeOtros = String(req.query.include_otros || '0') === '1';
+
   try {
     let productosPermitidos = [];
     let categoriasPermitidas = [];
@@ -183,35 +186,27 @@ export const buscarItemsVentaDetallado = async (req, res) => {
         .map((p) => p.categoria_id);
     }
 
-    // 🚩 nuevo: tomar local_id si viene por query
-    const localId = Number(req.query.local_id || 0);
-    console.log("locaaaal",localId)
-    // Base con stock disponible (+ local si viene)
+    // where base (local si viene)
     let whereStock = {
       cantidad: { [Op.gt]: 0 },
       ...(localId ? { local_id: localId } : {})
     };
 
     if (isNumericSku) {
-      // Búsqueda exacta por SKU decodificado
       try {
         const ids = decodeNumericSku(q);
         Object.assign(whereStock, {
           producto_id: ids.producto_id,
           lugar_id: ids.lugar_id,
           estado_id: ids.estado_id
-          // 👇 y dejamos el local forzado si vino por query
-          // si NO vino local_id, podés opcionalmente setear:
-          // ...(localId ? {} : { local_id: ids.local_id })
         });
       } catch {
-        return res.json([]); // código inválido
+        return res.json([]); // SKU inválido
       }
-    } else {
-      // Búsqueda por texto / id
+    } else if (q) {
       whereStock[Op.or] = [
-        { codigo_sku: { [Op.like]: `%${q}%` } }, // 👈 usar q
-        { '$producto.nombre$': { [Op.like]: `%${q}%` } }, // 👈 usar q
+        { codigo_sku: { [Op.like]: `%${q}%` } },
+        { '$producto.nombre$': { [Op.like]: `%${q}%` } },
         ...(isNumeric
           ? [{ '$producto.id$': Number(q) }, { id: Number(q) }]
           : [])
@@ -232,26 +227,34 @@ export const buscarItemsVentaDetallado = async (req, res) => {
       ];
     }
 
-    const items = await StockModel.findAll({
+    // 🔹 include con producto + locale (para nombre de la sucursal)
+    const baseInclude = [
+      {
+        model: ProductosModel,
+        as: 'producto',
+        attributes: [
+          'id',
+          'nombre',
+          'precio',
+          'descuento_porcentaje',
+          'precio_con_descuento',
+          'categoria_id'
+        ]
+      },
+      {
+        model: LocalesModel,
+        as: 'locale',
+        attributes: ['id', 'nombre', 'codigo', 'direccion'] // lo que quieras exponer
+      }
+    ];
+
+    const itemsLocal = await StockModel.findAll({
       where: whereStock,
-      include: [
-        {
-          model: ProductosModel,
-          as: 'producto',
-          attributes: [
-            'id',
-            'nombre',
-            'precio',
-            'descuento_porcentaje',
-            'precio_con_descuento',
-            'categoria_id'
-          ]
-        }
-      ],
+      include: baseInclude,
       limit: 50
     });
 
-    const respuesta = items.map((s) => ({
+    const mapItem = (s) => ({
       stock_id: s.id,
       producto_id: s.producto.id,
       nombre: s.producto.nombre,
@@ -264,13 +267,73 @@ export const buscarItemsVentaDetallado = async (req, res) => {
         : parseFloat(s.producto.precio),
       cantidad_disponible: s.cantidad,
       codigo_sku: s.codigo_sku,
-      categoria_id: s.producto.categoria_id
-    }));
+      categoria_id: s.producto.categoria_id,
+      local_id: s.local_id,
+      local_nombre: s.locale?.nombre || null, // 👈 aquí
+      local_codigo: s.locale?.codigo || null, // 👈 opcional
+      local_direccion: s.locale?.direccion || null // 👈 opcional
+    });
 
-    res.json(respuesta);
+    const respLocal = itemsLocal.map(mapItem);
+
+    // 👉 Si no piden otros o no hay localId, respondemos como siempre (array)
+    if (!includeOtros || !localId) {
+      return res.json(respLocal);
+    }
+
+    // 🔎 Buscar en otras sucursales (mismo criterio, excluyendo la mía)
+    const whereOtros = {
+      cantidad: { [Op.gt]: 0 },
+      local_id: { [Op.ne]: localId }
+    };
+
+    if (isNumericSku) {
+      const ids = decodeNumericSku(q);
+      Object.assign(whereOtros, {
+        producto_id: ids.producto_id,
+        lugar_id: ids.lugar_id,
+        estado_id: ids.estado_id
+      });
+    } else if (q) {
+      whereOtros[Op.or] = [
+        { codigo_sku: { [Op.like]: `%${q}%` } },
+        { '$producto.nombre$': { [Op.like]: `%${q}%` } },
+        ...(isNumeric
+          ? [{ '$producto.id$': Number(q) }, { id: Number(q) }]
+          : [])
+      ];
+    }
+
+    if (
+      combo_id &&
+      (productosPermitidos.length > 0 || categoriasPermitidas.length > 0)
+    ) {
+      whereOtros[Op.and] = [
+        {
+          [Op.or]: [
+            { '$producto.id$': productosPermitidos },
+            { '$producto.categoria_id$': categoriasPermitidas }
+          ]
+        }
+      ];
+    }
+
+    const itemsOtros = await StockModel.findAll({
+      where: whereOtros,
+      include: baseInclude,
+      limit: 200
+    });
+
+    const respOtros = itemsOtros.map(mapItem);
+
+    // 🧾 Respuesta enriquecida
+    return res.json({
+      items_local: respLocal,
+      otros_items: respOtros
+    });
   } catch (error) {
     console.error('Error en búsqueda detallada de stock:', error);
-    res.status(500).json({ message: 'Error en búsqueda detallada' });
+    return res.status(500).json({ message: 'Error en búsqueda detallada' });
   }
 };
 

@@ -49,6 +49,7 @@ import { ComboVentaLogModel } from './Combos/MD_TB_ComboVentaLog.js';
 import { LogModel } from './Seguridad/MD_TB_Logs.js';
 // RELACIONES LOGS - USUARIOS
 
+import { PedidoStockModel } from './Stock/MD_TB_PedidoStock.js';
 // Relaciones de Stock con otras tablas
 StockModel.belongsTo(ProductosModel, { foreignKey: 'producto_id' });
 StockModel.belongsTo(LocalesModel, { foreignKey: 'local_id' });
@@ -119,13 +120,21 @@ VentasModel.hasMany(VentaDescuentosModel, {
 
 // Relaciones de devoluciones
 DevolucionesModel.belongsTo(VentasModel, { foreignKey: 'venta_id' });
-VentasModel.hasMany(DevolucionesModel, { foreignKey: 'venta_id', as: 'devoluciones' });
+VentasModel.hasMany(DevolucionesModel, {
+  foreignKey: 'venta_id',
+  as: 'devoluciones'
+});
 
 DevolucionesModel.belongsTo(UserModel, { foreignKey: 'usuario_id' });
 UserModel.hasMany(DevolucionesModel, { foreignKey: 'usuario_id' });
 
-DetalleDevolucionModel.belongsTo(DevolucionesModel, { foreignKey: 'devolucion_id' });
-DevolucionesModel.hasMany(DetalleDevolucionModel, { foreignKey: 'devolucion_id', as: 'detalles' });
+DetalleDevolucionModel.belongsTo(DevolucionesModel, {
+  foreignKey: 'devolucion_id'
+});
+DevolucionesModel.hasMany(DetalleDevolucionModel, {
+  foreignKey: 'devolucion_id',
+  as: 'detalles'
+});
 
 DetalleDevolucionModel.belongsTo(StockModel, { foreignKey: 'stock_id' });
 StockModel.hasMany(DetalleDevolucionModel, { foreignKey: 'stock_id' });
@@ -140,7 +149,6 @@ DetalleVentaModel.hasMany(DetalleDevolucionModel, {
   foreignKey: 'detalle_venta_id',
   as: 'devoluciones'
 });
-
 
 DevolucionesModel.belongsTo(LocalesModel, {
   foreignKey: 'local_id',
@@ -236,3 +244,24 @@ CombosModel.hasMany(ComboVentaLogModel, {
 // RELACIONES LOGS - USUARIOS
 LogModel.belongsTo(UserModel, { foreignKey: 'usuario_id', as: 'usuario' });
 UserModel.hasMany(LogModel, { foreignKey: 'usuario_id', as: 'logs' });
+
+PedidoStockModel.belongsTo(ProductosModel, {
+  as: 'producto',
+  foreignKey: 'producto_id'
+});
+PedidoStockModel.belongsTo(StockModel, {
+  as: 'stock_origen',
+  foreignKey: 'stock_id_origen'
+});
+PedidoStockModel.belongsTo(LocalesModel, {
+  as: 'local_origen',
+  foreignKey: 'local_origen_id'
+});
+PedidoStockModel.belongsTo(LocalesModel, {
+  as: 'local_destino',
+  foreignKey: 'local_destino_id'
+});
+PedidoStockModel.belongsTo(UserModel, {
+  as: 'creador',
+  foreignKey: 'creado_por'
+});

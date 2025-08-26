@@ -548,4 +548,20 @@ import {
 router.get('/stock/etiquetas/ticket/demo', imprimirEtiquetaTicketDemo);
 router.get('/stock/etiquetas/ticket', imprimirEtiquetasTicket);
 
+import {
+  OBRS_PedidosStock_CTS,
+  OBR_PedidoStock_CTS,
+  CR_PedidoStock_CTS,
+  UR_PedidoStock_Estado_CTS,
+  UR_PedidoStock_Cantidades_CTS,
+  ER_PedidoStock_CTS
+} from '../Controllers/Stock/CTS_TB_PedidoStock.js';
+
+
+router.get('/pedidos', OBRS_PedidosStock_CTS);
+router.get('/pedidos/:id', OBR_PedidoStock_CTS);
+router.post('/pedidos', CR_PedidoStock_CTS);
+router.patch('/pedidos/:id/estado', UR_PedidoStock_Estado_CTS);
+router.patch('/pedidos/:id/cantidades', UR_PedidoStock_Cantidades_CTS);
+router.delete('/pedidos/:id', ER_PedidoStock_CTS); // cancelar
 export default router;
