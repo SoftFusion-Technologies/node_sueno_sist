@@ -17,13 +17,15 @@
 
 import dotenv from 'dotenv';
 import { Op } from 'sequelize';
-import db from '../../DataBase/db.js';
+// Controllers/Stock/CTS_TB_PedidoStock.js
+import db from '../../DataBase/db.js'; 
+import { Transaction } from 'sequelize';
 import { PedidoStockModel } from '../../Models/Stock/MD_TB_PedidoStock.js';
 import MD_TB_Productos from '../../Models/Stock/MD_TB_Productos.js';
 import MD_TB_Locales from '../../Models/Stock/MD_TB_Locales.js';
 import MD_TB_Usuarios from '../../Models/MD_TB_Users.js';
 import { registrarLog } from '../../Helpers/registrarLog.js';
-
+import MD_TB_Stock from '../../Models/Stock/MD_TB_Stock.js';
 if (process.env.NODE_ENV !== 'production') {
   dotenv.config();
 }
@@ -31,7 +33,7 @@ if (process.env.NODE_ENV !== 'production') {
 const ProductosModel = MD_TB_Productos.ProductosModel;
 const LocalesModel = MD_TB_Locales.LocalesModel;
 const UserModel = MD_TB_Usuarios.UserModel;
-
+const StockModel = MD_TB_Stock.StockModel;
 // Transiciones de estado permitidas
 const TRANSICIONES = {
   pendiente: ['visto', 'cancelado'],
@@ -279,70 +281,6 @@ export const UR_PedidoStock_Estado_CTS = async (req, res) => {
   }
 };
 
-// ========== UR: Actualizar cantidades (preparada/enviada/recibida) ==========
-export const UR_PedidoStock_Cantidades_CTS = async (req, res) => {
-  const { id } = req.params;
-  const {
-    cantidad_preparada, // opcional
-    cantidad_enviada, // opcional
-    cantidad_recibida, // opcional
-    usuario_log_id
-  } = req.body;
-
-  try {
-    const pedido = await PedidoStockModel.findByPk(id);
-    if (!pedido)
-      return res.status(404).json({ mensajeError: 'Pedido no encontrado' });
-
-    const updates = {};
-
-    if (cantidad_preparada !== undefined) {
-      const val = Number(cantidad_preparada);
-      if (val < 0 || val > pedido.cantidad_solicitada) {
-        return res
-          .status(400)
-          .json({ mensajeError: 'cantidad_preparada inválida' });
-      }
-      updates.cantidad_preparada = val;
-    }
-
-    if (cantidad_enviada !== undefined) {
-      const val = Number(cantidad_enviada);
-      const tope = updates.cantidad_preparada ?? pedido.cantidad_preparada;
-      if (val < 0 || val > tope) {
-        return res
-          .status(400)
-          .json({ mensajeError: 'cantidad_enviada inválida' });
-      }
-      updates.cantidad_enviada = val;
-    }
-
-    if (cantidad_recibida !== undefined) {
-      const val = Number(cantidad_recibida);
-      const tope = updates.cantidad_enviada ?? pedido.cantidad_enviada;
-      if (val < 0 || val > tope) {
-        return res
-          .status(400)
-          .json({ mensajeError: 'cantidad_recibida inválida' });
-      }
-      updates.cantidad_recibida = val;
-    }
-
-    await pedido.update(updates);
-
-    // Log
-    const cambios = Object.entries(updates)
-      .map(([k, v]) => `${k}=${v}`)
-      .join(', ');
-    const desc = `actualizó cantidades del pedido #${pedido.id} (${cambios})`;
-    await registrarLog(req, 'Pedidos Stock', 'editar', desc, usuario_log_id);
-
-    res.json({ message: 'Cantidades actualizadas', pedido });
-  } catch (error) {
-    console.error('Error al actualizar cantidades:', error);
-    res.status(500).json({ mensajeError: error.message });
-  }
-};
 
 // ========== ER: Cancelar pedido ==========
 export const ER_PedidoStock_CTS = async (req, res) => {
@@ -377,5 +315,87 @@ export const ER_PedidoStock_CTS = async (req, res) => {
   } catch (error) {
     console.error('Error al cancelar pedido:', error);
     res.status(500).json({ mensajeError: error.message });
+  }
+};
+
+export const UR_PedidoStock_Cantidades_CTS = async (req, res) => {
+  const t = await db.transaction(); // 👈 usar la instancia db
+  try {
+    const { id } = req.params;
+    // Normalizamos a número (o undefined)
+    const cantidad_preparada =
+      req.body.cantidad_preparada != null
+        ? Number(req.body.cantidad_preparada)
+        : undefined;
+    const cantidad_enviada =
+      req.body.cantidad_enviada != null
+        ? Number(req.body.cantidad_enviada)
+        : undefined;
+    const cantidad_recibida =
+      req.body.cantidad_recibida != null
+        ? Number(req.body.cantidad_recibida)
+        : undefined;
+    const usuario_log_id = req.body.usuario_log_id;
+
+    const pedido = await PedidoStockModel.findByPk(id, {
+      include: ['producto', 'local_destino'],
+      transaction: t,
+      lock: Transaction.LOCK.UPDATE // 👈 FOR UPDATE
+    });
+
+    if (!pedido) {
+      await t.rollback();
+      return res.status(404).json({ message: 'Pedido no encontrado' });
+    }
+
+    // Actualizamos cantidades (si vienen)
+    if (typeof cantidad_preparada === 'number')
+      pedido.cantidad_preparada = cantidad_preparada;
+    if (typeof cantidad_enviada === 'number')
+      pedido.cantidad_enviada = cantidad_enviada;
+    if (typeof cantidad_recibida === 'number')
+      pedido.cantidad_recibida = cantidad_recibida;
+
+    await pedido.save({ transaction: t });
+
+    // ✅ Si hay recibidos, sumamos al stock del local destino
+    if (typeof cantidad_recibida === 'number' && cantidad_recibida > 0) {
+      const stockDestino = await StockModel.findOne({
+        where: {
+          producto_id: pedido.producto_id,
+          local_id: pedido.local_destino_id
+        },
+        transaction: t,
+        lock: Transaction.LOCK.UPDATE
+      });
+
+      if (stockDestino) {
+        stockDestino.cantidad =
+          Number(stockDestino.cantidad) + cantidad_recibida;
+        await stockDestino.save({ transaction: t });
+      } else {
+        // Ajustá lugar_id / estado_id según tu regla por defecto
+        await StockModel.create(
+          {
+            producto_id: pedido.producto_id,
+            local_id: pedido.local_destino_id,
+            lugar_id: 1,
+            estado_id: 1,
+            cantidad: cantidad_recibida,
+            en_exhibicion: false,
+            observaciones: `Alta por recepción Pedido #${pedido.id}`,
+            codigo_sku: pedido.producto?.codigo_sku ?? null
+          },
+          { transaction: t }
+        );
+      }
+    }
+
+    await t.commit();
+    res.json({ message: 'Pedido actualizado y stock sincronizado' });
+  } catch (err) {
+    await t.rollback();
+    console.error('Error al actualizar cantidades:', err);
+    res.status(500).json({ message: 'Error al actualizar cantidades' });
   }
 };
