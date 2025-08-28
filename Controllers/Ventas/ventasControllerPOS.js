@@ -2,7 +2,6 @@
 import { Op, Sequelize } from 'sequelize';
 import { StockModel } from '../../Models/Stock/MD_TB_Stock.js';
 import { ProductosModel } from '../../Models/Stock/MD_TB_Productos.js';
-import { TallesModel } from '../../Models/Stock/MD_TB_Talles.js';
 
 import db from '../../DataBase/db.js'; // Ajusta la ruta según tu proyecto
 import { getFechaArgentina } from '../../Utils/fechaArgentina.js';
@@ -337,7 +336,6 @@ export const buscarItemsVentaDetallado = async (req, res) => {
   }
 };
 
-
 // Registrar una venta completa
 export const registrarVenta = async (req, res) => {
   const {
@@ -567,7 +565,8 @@ export const OBR_VentaDetalle_CTS = async (req, res) => {
           include: [
             {
               model: StockModel,
-              include: [{ model: ProductosModel }, { model: TallesModel }]
+              // as: 'stock', // si tu asociación usa alias, mantenelo
+              include: [{ model: ProductosModel }]
             }
           ]
         },
@@ -579,10 +578,7 @@ export const OBR_VentaDetalle_CTS = async (req, res) => {
           as: 'venta_medios_pago',
           include: [{ model: MediosPagoModel }]
         },
-        {
-          model: VentaDescuentosModel,
-          as: 'descuentos' // 👈 Agregado
-        }, // 🔁 Agregamos las devoluciones y sus detalles
+        { model: VentaDescuentosModel, as: 'descuentos' },
         {
           model: DevolucionesModel,
           as: 'devoluciones',
@@ -601,32 +597,22 @@ export const OBR_VentaDetalle_CTS = async (req, res) => {
     if (!venta)
       return res.status(404).json({ mensajeError: 'Venta no encontrada' });
 
-    // Calcular subtotal sin descuentos
     let totalSinDescuento = 0;
     let descuentoProducto = 0;
-    let descuentoCarrito = 0; // si tienes descuentos aplicados en carrito
-    let descuentoMedioPago = 0; // si tienes descuentos aplicados por medio de pago
 
     for (const detalle of venta.detalles) {
-      const precioBase = detalle.precio_unitario * detalle.cantidad;
-      totalSinDescuento += precioBase;
-      // Aquí puedes calcular descuentos específicos por detalle si guardas ese dato
-      // Por ejemplo, si detalle.descuento existe
-      if (detalle.descuento) {
+      totalSinDescuento +=
+        (detalle.precio_unitario || 0) * (detalle.cantidad || 0);
+      if (detalle.descuento)
         descuentoProducto += detalle.descuento * detalle.cantidad;
-      }
     }
-
-    // Suponiendo que tienes campos en venta para descuentos de carrito y medio pago
-    descuentoCarrito = venta.descuento_carrito || 0;
-    descuentoMedioPago = venta.descuento_medio_pago || 0;
 
     const respuesta = {
       ...venta.toJSON(),
       total_sin_descuentos: totalSinDescuento,
       total_descuento_producto: descuentoProducto,
-      total_descuento_carrito: descuentoCarrito,
-      total_descuento_medio_pago: descuentoMedioPago
+      total_descuento_carrito: venta.descuento_carrito || 0,
+      total_descuento_medio_pago: venta.descuento_medio_pago || 0
     };
 
     res.json(respuesta);
@@ -634,6 +620,7 @@ export const OBR_VentaDetalle_CTS = async (req, res) => {
     res.status(500).json({ mensajeError: error.message });
   }
 };
+
 
 // 🚫 Anular una venta
 export const anularVenta = async (req, res) => {

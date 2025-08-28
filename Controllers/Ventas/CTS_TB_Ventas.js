@@ -20,7 +20,7 @@ import { ClienteModel } from '../../Models/MD_TB_Clientes.js';
 import { DetalleVentaModel } from '../../Models/Ventas/MD_TB_DetalleVenta.js';
 import { StockModel } from '../../Models/Stock/MD_TB_Stock.js';
 import { ProductosModel } from '../../Models/Stock/MD_TB_Productos.js';
-import { TallesModel } from '../../Models/Stock/MD_TB_Talles.js';
+// import { TallesModel } from '../../Models/Stock/MD_TB_Talles.js';
 import { VentaDescuentosModel } from '../../Models/Ventas/MD_TB_VentaDescuentos.js';
 import { DetalleDevolucionModel } from '../../Models/Ventas/MD_TB_DetalleDevolucion.js';
 import { DevolucionesModel } from '../../Models/Ventas/MD_TB_Devoluciones.js';
@@ -77,12 +77,12 @@ export const OBR_Venta_CTS = async (req, res) => {
                   model: ProductosModel,
                   as: 'producto',
                   attributes: ['id', 'nombre', 'precio']
-                },
-                {
-                  model: TallesModel,
-                  as: 'talle',
-                  attributes: ['id', 'nombre']
                 }
+                // {
+                //   model: TallesModel,
+                //   as: 'talle',
+                //   attributes: ['id', 'nombre']
+                // }
               ]
             }
           ]
