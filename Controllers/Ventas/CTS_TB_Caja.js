@@ -17,6 +17,17 @@ import { LocalesModel } from '../../Models/Stock/MD_TB_Locales.js';
 import { UserModel } from '../../Models/MD_TB_Users.js';
 import { MovimientosCajaModel } from '../../Models/Ventas/MD_TB_MovimientosCaja.js';
 
+import { registrarLog } from '../../Helpers/registrarLog.js';
+
+const fmtARS = (n) =>
+  new Intl.NumberFormat('es-AR', {
+    style: 'currency',
+    currency: 'ARS',
+    minimumFractionDigits: 2
+  })
+    .format(Number(n || 0))
+    .replace(/\s+/g, '');
+
 // Obtener todas las cajas
 export const OBRS_Caja_CTS = async (req, res) => {
   try {
@@ -43,6 +54,7 @@ export const OBR_Caja_CTS = async (req, res) => {
 };
 
 // Crear (abrir) una nueva caja
+// ========================= CREAR (ABRIR) =========================
 export const CR_Caja_CTS = async (req, res) => {
   const { local_id, usuario_id, saldo_inicial } = req.body;
 
@@ -59,6 +71,27 @@ export const CR_Caja_CTS = async (req, res) => {
       usuario_id,
       saldo_inicial
     });
+
+    // ---- LOG (fuera de try/catch principal; si falla no rompe respuesta) ----
+    try {
+      const [local, usuario] = await Promise.all([
+        LocalesModel.findByPk(local_id, { attributes: ['id', 'nombre'] }),
+        UserModel.findByPk(usuario_id, { attributes: ['id', 'nombre'] })
+      ]);
+
+      const parts = [
+        `abrió la caja #${nuevaCaja.id}`,
+        `en ${
+          local?.nombre ? `local "${local.nombre}"` : `local #${local_id}`
+        }`,
+        `con saldo inicial ${fmtARS(saldo_inicial)}`
+      ];
+      await registrarLog(req, 'caja', 'crear', parts.join(' · '), usuario_id);
+    } catch (e) {
+      console.warn('[registrarLog abrir caja] no crítico:', e.message);
+    }
+    // ------------------------------------------------------------------------
+
     res.json({ message: 'Caja abierta correctamente', caja: nuevaCaja });
   } catch (error) {
     res.status(500).json({ mensajeError: error.message });
@@ -66,12 +99,54 @@ export const CR_Caja_CTS = async (req, res) => {
 };
 
 // Eliminar una caja
+// ========================= ELIMINAR =========================
 export const ER_Caja_CTS = async (req, res) => {
   try {
-    const eliminado = await CajaModel.destroy({ where: { id: req.params.id } });
+    const id = req.params.id;
+
+    // Traigo antes (para el log)
+    const cajaPrev = await CajaModel.findByPk(id);
+
+    const eliminado = await CajaModel.destroy({ where: { id } });
 
     if (!eliminado)
       return res.status(404).json({ mensajeError: 'Caja no encontrada' });
+
+    // ---- LOG ----
+    try {
+      const usuario_log_id =
+        req.body?.usuario_id ?? cajaPrev?.usuario_id ?? null;
+      const [local, usuario] = await Promise.all([
+        LocalesModel.findByPk(cajaPrev?.local_id, {
+          attributes: ['id', 'nombre']
+        }),
+        usuario_log_id
+          ? UserModel.findByPk(usuario_log_id, { attributes: ['id', 'nombre'] })
+          : null
+      ]);
+
+      const parts = [
+        `eliminó la caja #${id}`,
+        cajaPrev?.local_id
+          ? `de ${
+              local?.nombre
+                ? `local "${local.nombre}"`
+                : `local #${cajaPrev.local_id}`
+            }`
+          : ''
+      ].filter(Boolean);
+
+      await registrarLog(
+        req,
+        'caja',
+        'eliminar',
+        parts.join(' · '),
+        usuario_log_id || undefined
+      );
+    } catch (e) {
+      console.warn('[registrarLog eliminar caja] no crítico:', e.message);
+    }
+    // ----------
 
     res.json({ message: 'Caja eliminada correctamente' });
   } catch (error) {
@@ -80,6 +155,7 @@ export const ER_Caja_CTS = async (req, res) => {
 };
 
 // Actualizar/cerrar una caja
+// ========================= ACTUALIZAR / CERRAR =========================
 export const UR_Caja_CTS = async (req, res) => {
   const { id } = req.params;
 
@@ -88,6 +164,78 @@ export const UR_Caja_CTS = async (req, res) => {
 
     if (updated === 1) {
       const actualizada = await CajaModel.findByPk(id);
+
+      // ---- LOG ----
+      try {
+        const usuario_log_id =
+          req.body?.usuario_id ?? actualizada?.usuario_id ?? null;
+        const [local, usuario] = await Promise.all([
+          LocalesModel.findByPk(actualizada?.local_id, {
+            attributes: ['id', 'nombre']
+          }),
+          usuario_log_id
+            ? UserModel.findByPk(usuario_log_id, {
+                attributes: ['id', 'nombre']
+              })
+            : null
+        ]);
+
+        const esCierre =
+          Object.prototype.hasOwnProperty.call(req.body, 'fecha_cierre') &&
+          req.body.fecha_cierre !== null;
+
+        // Campos útiles si vinieron en el body
+        const saldoInicialTxt = Object.prototype.hasOwnProperty.call(
+          req.body,
+          'saldo_inicial'
+        )
+          ? `saldo inicial ${fmtARS(req.body.saldo_inicial)}`
+          : null;
+
+        const saldoFinalTxt = Object.prototype.hasOwnProperty.call(
+          req.body,
+          'saldo_final'
+        )
+          ? `saldo final ${fmtARS(req.body.saldo_final)}`
+          : null;
+
+        const otroTxt = (() => {
+          // Lista breve de claves cambiadas (sin valores)
+          const keys = Object.keys(req.body || {}).filter(
+            (k) => !['usuario_id'].includes(k)
+          );
+          return keys.length ? `campos: ${keys.join(', ')}` : null;
+        })();
+
+        const parts = [
+          esCierre ? `cerró la caja #${id}` : `actualizó la caja #${id}`,
+          actualizada?.local_id
+            ? `en ${
+                local?.nombre
+                  ? `local "${local.nombre}""`
+                  : `local #${actualizada.local_id}`
+              }`
+            : '',
+          saldoInicialTxt,
+          saldoFinalTxt,
+          otroTxt
+        ].filter(Boolean);
+
+        await registrarLog(
+          req,
+          'caja',
+          esCierre ? 'cerrar' : 'actualizar',
+          parts.join(' · '),
+          usuario_log_id || undefined
+        );
+      } catch (e) {
+        console.warn(
+          '[registrarLog actualizar/cerrar caja] no crítico:',
+          e.message
+        );
+      }
+      // ----------
+
       res.json({ message: 'Caja actualizada correctamente', actualizada });
     } else {
       res.status(404).json({ mensajeError: 'Caja no encontrada' });

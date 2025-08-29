@@ -410,6 +410,7 @@ export const ER_Stock_CTS = async (req, res) => {
 };
 
 // Actualizar registro de stock y fusionar si existe la combinación
+// Actualizar registro de stock y fusionar si existe la combinación
 export const UR_Stock_CTS = async (req, res) => {
   const {
     producto_id,
@@ -423,10 +424,16 @@ export const UR_Stock_CTS = async (req, res) => {
   } = req.body;
 
   const id = req.params.id;
+
+  // Helpers
+  const toBool = (v) => v === true || v === 'true' || v === 1 || v === '1';
+  const prettyBool = (b) => (b ? 'Sí' : 'No');
+
   const cantidadNum = Number(cantidad);
   if (isNaN(cantidadNum)) {
     return res.status(400).json({ mensajeError: 'Cantidad inválida' });
   }
+  const enExhibicionBool = en_exhibicion === undefined ? undefined : toBool(en_exhibicion);
 
   try {
     const producto = await ProductosModel.findByPk(producto_id);
@@ -452,7 +459,8 @@ export const UR_Stock_CTS = async (req, res) => {
       const cantidadOriginal = existente.cantidad;
       const nuevoStock = await existente.update({
         cantidad: existente.cantidad + cantidadNum,
-        en_exhibicion: en_exhibicion ?? existente.en_exhibicion
+        en_exhibicion:
+          enExhibicionBool === undefined ? existente.en_exhibicion : enExhibicionBool
       });
 
       await StockModel.destroy({ where: { id } });
@@ -474,7 +482,18 @@ export const UR_Stock_CTS = async (req, res) => {
       return res.json({ message: 'Stock fusionado', actualizado: nuevoStock });
     }
 
-    // Auditar cambios campo a campo
+    // ========= Dif por campos (con normalización) =========
+    const nuevos = {
+      producto_id,
+      local_id,
+      lugar_id,
+      estado_id,
+      cantidad: cantidadNum,
+      en_exhibicion: enExhibicionBool === undefined ? stockActual.en_exhibicion : enExhibicionBool,
+      observaciones,
+      codigo_sku
+    };
+
     const camposAuditar = [
       'producto_id',
       'local_id',
@@ -488,26 +507,40 @@ export const UR_Stock_CTS = async (req, res) => {
     const cambios = [];
 
     for (const campo of camposAuditar) {
-      if (
-        req.body[campo] !== undefined &&
-        req.body[campo]?.toString() !== stockActual[campo]?.toString()
-      ) {
-        cambios.push(
-          `cambió el campo "${campo}" de "${stockActual[campo]}" a "${req.body[campo]}"`
-        );
+      if (req.body[campo] === undefined && campo !== 'cantidad') continue; // cantidad siempre llega
+
+      const prev = stockActual[campo];
+      const next =
+        campo === 'en_exhibicion'
+          ? (enExhibicionBool === undefined ? prev : enExhibicionBool)
+          : nuevos[campo];
+
+      // Igualdad estricta para boolean/number/string
+      const distintos =
+        (campo === 'en_exhibicion' ? Boolean(prev) !== Boolean(next) : `${prev}` !== `${next}`);
+
+      if (distintos) {
+        if (campo === 'en_exhibicion') {
+          cambios.push(
+            `cambió el campo "en_exhibicion" de "${prettyBool(Boolean(prev))}" a "${prettyBool(Boolean(next))}"`
+          );
+        } else {
+          cambios.push(`cambió el campo "${campo}" de "${prev ?? ''}" a "${next ?? ''}"`);
+        }
       }
     }
+    // =======================================================
 
     const [updated] = await StockModel.update(
       {
-        producto_id,
-        local_id,
-        lugar_id,
-        estado_id,
-        cantidad: cantidadNum,
-        en_exhibicion,
-        observaciones,
-        codigo_sku
+        producto_id: nuevos.producto_id,
+        local_id: nuevos.local_id,
+        lugar_id: nuevos.lugar_id,
+        estado_id: nuevos.estado_id,
+        cantidad: nuevos.cantidad,
+        en_exhibicion: nuevos.en_exhibicion,
+        observaciones: nuevos.observaciones,
+        codigo_sku: nuevos.codigo_sku
       },
       { where: { id } }
     );
@@ -518,9 +551,7 @@ export const UR_Stock_CTS = async (req, res) => {
       if (usuario_log_id) {
         const descripcion =
           cambios.length > 0
-            ? `actualizó el stock del producto "${
-                producto?.nombre
-              }" y ${cambios.join(', ')}`
+            ? `actualizó el stock del producto "${producto?.nombre}" y ${cambios.join(', ')}`
             : `actualizó el stock del producto "${producto?.nombre}" sin cambios relevantes`;
 
         await registrarLog(req, 'stock', 'editar', descripcion, usuario_log_id);
@@ -535,6 +566,7 @@ export const UR_Stock_CTS = async (req, res) => {
     res.status(500).json({ mensajeError: error.message });
   }
 };
+
 
 export const ER_StockPorProducto = async (req, res) => {
   try {
