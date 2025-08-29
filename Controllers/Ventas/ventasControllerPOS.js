@@ -25,6 +25,8 @@ import { ComboVentaLogModel } from '../../Models/Combos/MD_TB_ComboVentaLog.js';
 import { DetalleVentaCombosModel } from '../../Models/Combos/MD_TB_DetalleVentaCombos.js';
 import { ComboProductosPermitidosModel } from '../../Models/Combos/MD_TB_ComboProductosPermitidos.js';
 
+import { registrarLog } from '../../Helpers/registrarLog.js';
+
 const WIDTHS_SKU = {
   prod: 5,
   local: 3,
@@ -344,7 +346,7 @@ export const registrarVenta = async (req, res) => {
     combos = [], // 🆕 Soporte para combos
     total,
     medio_pago_id,
-    usuario_id,
+    usuario_id, // <- lo uso para el log
     local_id,
     descuento_porcentaje = 0,
     recargo_porcentaje = 0,
@@ -412,6 +414,28 @@ export const registrarVenta = async (req, res) => {
         );
       }
     }
+
+    // 2) Resolvemos nombres para el log (medio de pago y productos)
+    const medioPago = await MediosPagoModel.findByPk(medio_pago_id, {
+      transaction: t,
+      attributes: ['id', 'nombre']
+    });
+
+    // ⬇️ Construimos el mapa stock_id -> nombreProducto
+    const stockIds = [...new Set(productos.map((p) => p.stock_id))];
+    const stocks = await StockModel.findAll({
+      where: { id: stockIds },
+      include: [
+        { model: ProductosModel, as: 'producto', attributes: ['id', 'nombre'] }
+      ],
+      transaction: t
+    });
+    const mapaNombreProductoPorStock = new Map(
+      stocks.map((s) => [
+        s.id,
+        s.producto?.nombre || `Producto#${s.producto_id}`
+      ])
+    );
 
     const fechaFinal = getFechaArgentina();
 
@@ -533,6 +557,90 @@ export const registrarVenta = async (req, res) => {
 
     await t.commit();
 
+    // ===================== LOG DESPUÉS DEL COMMIT =====================
+    try {
+      // Armamos una descripción linda con los datos que ya tenemos
+      // helper local
+      const fmtARS = new Intl.NumberFormat('es-AR', {
+        style: 'currency',
+        currency: 'ARS',
+        minimumFractionDigits: 2
+      });
+
+      // (opcional) resolver nombres de usuario/local para el log
+      const [usuarioLog, localLog] = await Promise.all([
+        UserModel.findByPk(usuario_id, { attributes: ['id', 'nombre'] }),
+        LocalesModel.findByPk(local_id, { attributes: ['id', 'nombre'] })
+      ]);
+
+      const itemsTxt = productos
+        .map((p) => {
+          const nombre =
+            mapaNombreProductoPorStock.get(p.stock_id) ?? `Stock#${p.stock_id}`;
+          return `${nombre} x${p.cantidad}`;
+        })
+        .join(', ');
+
+      const combosTxt = (combos || [])
+        .map(
+          (c) =>
+            `Combo#${c.combo_id} ${fmtARS.format(Number(c.precio_combo || 0))}`
+        )
+        .join(', ');
+
+      // Descuentos
+      const huboDescuento =
+        aplicar_descuento &&
+        (descuento > 0 || (origenes_descuento?.length || 0) > 0);
+      const tiposDesc = (origenes_descuento || [])
+        .map((o) => o.tipo)
+        .join(', ');
+
+      // Medio de pago / cuotas
+      const medioPagoTxt = medioPago?.nombre || `MedioPago#${medio_pago_id}`;
+      const cuotasTxt =
+        cuotas > 1
+          ? `, cuotas: ${cuotas}${
+              porcentaje_recargo_cuotas
+                ? ` (+${porcentaje_recargo_cuotas}% cuotas)`
+                : ''
+            }`
+          : '';
+      const parts = [
+        `registró la venta #${venta.id}`,
+        `en ${
+          localLog?.nombre ? `local "${localLog.nombre}"` : `local #${local_id}`
+        }`,
+        `por ${fmtARS.format(Number(totalFinal))}`,
+        `(medio de pago: ${medioPagoTxt}${cuotasTxt})`,
+        `Ítems: ${itemsTxt}`
+      ];
+
+      // opcionales
+      if (combosTxt) parts.push(`Combos: ${combosTxt}`);
+      if (huboDescuento)
+        parts.push(
+          `Descuentos: ${descuento}%${tiposDesc ? ` (${tiposDesc})` : ''}`
+        );
+      if (recargo > 0) parts.push(`Recargo: ${recargo}%`);
+      if (diferencia_redondeo)
+        parts.push(`Redondeo: ${fmtARS.format(Number(diferencia_redondeo))}`);
+
+      const descripcion = parts.join(' · ');
+
+      // guardar log (fuera de la transacción)
+      await registrarLog(
+        req,
+        'ventas',
+        'crear',
+        descripcion,
+        usuario_id // o usuario_log_id si tu helper lo requiere
+      );
+    } catch (e) {
+      // No romper la respuesta por un fallo de log:
+      console.warn('[registrarLog venta] no crítico:', e.message);
+    }
+    // ==================================================================
     res.status(201).json({
       message: 'Venta registrada correctamente',
       venta_id: venta.id,
@@ -621,7 +729,6 @@ export const OBR_VentaDetalle_CTS = async (req, res) => {
   }
 };
 
-
 // 🚫 Anular una venta
 export const anularVenta = async (req, res) => {
   const ventaId = req.params.id;
@@ -630,14 +737,8 @@ export const anularVenta = async (req, res) => {
   try {
     const venta = await VentasModel.findByPk(ventaId, {
       include: [
-        {
-          model: DetalleVentaModel,
-          as: 'detalles'
-        },
-        {
-          model: VentaMediosPagoModel,
-          as: 'venta_medios_pago'
-        }
+        { model: DetalleVentaModel, as: 'detalles' },
+        { model: VentaMediosPagoModel, as: 'venta_medios_pago' }
       ],
       transaction: t
     });
@@ -646,7 +747,6 @@ export const anularVenta = async (req, res) => {
       await t.rollback();
       return res.status(404).json({ mensajeError: 'Venta no encontrada' });
     }
-
     if (venta.estado === 'anulada') {
       await t.rollback();
       return res.status(400).json({ mensajeError: 'La venta ya fue anulada' });
@@ -656,7 +756,6 @@ export const anularVenta = async (req, res) => {
       where: { venta_id: ventaId },
       transaction: t
     });
-
     if (devoluciones.length > 0) {
       throw new Error(
         'No se puede anular una venta que ya tiene devoluciones registradas'
@@ -671,7 +770,6 @@ export const anularVenta = async (req, res) => {
       },
       transaction: t
     });
-
     if (!caja) throw new Error('No hay caja abierta');
 
     // Devolver stock
@@ -700,11 +798,96 @@ export const anularVenta = async (req, res) => {
     venta.estado = 'anulada';
     await venta.save({ transaction: t });
 
+    // Datos para el log (resolver nombres antes del commit si necesitás dentro de la tx)
+    // Medio de pago (toma el primero si hay varios)
+    const mp = venta.venta_medios_pago?.[0];
+    const medioPago = mp
+      ? await MediosPagoModel.findByPk(mp.medio_pago_id, {
+          attributes: ['id', 'nombre'],
+          transaction: t
+        })
+      : null;
+
+    // Mapa stock_id -> nombre de producto (para listar ítems en el log)
+    const stockIds = [...new Set(venta.detalles.map((d) => d.stock_id))];
+    const stocks = stockIds.length
+      ? await StockModel.findAll({
+          where: { id: stockIds },
+          include: [
+            {
+              model: ProductosModel,
+              as: 'producto',
+              attributes: ['id', 'nombre']
+            }
+          ],
+          transaction: t
+        })
+      : [];
+    const mapaNombreProductoPorStock = new Map(
+      stocks.map((s) => [
+        s.id,
+        s.producto?.nombre || `Producto#${s.producto_id}`
+      ])
+    );
+
     await t.commit();
-    res.json({ mensaje: 'Venta anulada correctamente', id: venta.id });
+
+    // ============ LOG (fuera de la transacción) ============
+    try {
+      const fmtARS = new Intl.NumberFormat('es-AR', {
+        style: 'currency',
+        currency: 'ARS',
+        minimumFractionDigits: 2
+      });
+
+      // usuario que anula: si lo enviás en body, usalo; si no, el dueño original de la venta
+      const usuarioLogId = req.body?.usuario_id || venta.usuario_id;
+
+      const [usuarioLog, localLog] = await Promise.all([
+        UserModel.findByPk(usuarioLogId, { attributes: ['id', 'nombre'] }),
+        LocalesModel.findByPk(venta.local_id, { attributes: ['id', 'nombre'] })
+      ]);
+
+      const itemsTxt = (venta.detalles || [])
+        .map((d) => {
+          const nombre =
+            mapaNombreProductoPorStock.get(d.stock_id) ?? `Stock#${d.stock_id}`;
+          return `${nombre} x${d.cantidad}`;
+        })
+        .join(', ');
+
+      const medioPagoTxt =
+        medioPago?.nombre || (mp ? `MedioPago#${mp.medio_pago_id}` : '—');
+
+      const parts = [
+        `anuló la venta #${venta.id}`,
+        `en ${
+          localLog?.nombre
+            ? `local "${localLog.nombre}"`
+            : `local #${venta.local_id}`
+        }`,
+        `por ${fmtARS.format(Number(venta.total || 0))}`,
+        `(medio de pago: ${medioPagoTxt})`,
+        itemsTxt ? `Ítems: ${itemsTxt}` : ''
+      ].filter(Boolean);
+
+      // OJO: tu registrarLog probablemente antepone “El usuario ...”
+      await registrarLog(
+        req,
+        'ventas',
+        'anular',
+        parts.join(' · '),
+        usuarioLogId
+      );
+    } catch (e) {
+      console.warn('[registrarLog anularVenta] no crítico:', e.message);
+    }
+    // =======================================================
+
+    return res.json({ mensaje: 'Venta anulada correctamente', id: venta.id });
   } catch (error) {
     await t.rollback();
     console.error('[Error al anular venta]', error);
-    res.status(500).json({ mensajeError: error.message });
+    return res.status(500).json({ mensajeError: error.message });
   }
 };
