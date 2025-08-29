@@ -18,6 +18,18 @@ import db from '../DataBase/db.js'
 const ClienteModel = MD_TB_Clientes.ClienteModel;
 import { Op } from 'sequelize';
 
+// Helper de logs
+import { registrarLog } from '../Helpers/registrarLog.js';
+
+// Helpers de texto
+const show = (v) => (v === null || v === undefined || v === '' ? '-' : String(v));
+const fieldLabel = {
+  nombre: 'nombre',
+  telefono: 'teléfono',
+  email: 'email',
+  direccion: 'dirección',
+  dni: 'DNI',
+};
 // Obtener todos los clientes
 export const OBRS_Clientes_CTS = async (req, res) => {
   try {
@@ -42,9 +54,9 @@ export const OBR_Cliente_CTS = async (req, res) => {
   }
 };
 
-// Crear un nuevo cliente
+// ======================= Crear =======================
 export const CR_Cliente_CTS = async (req, res) => {
-  const { nombre, telefono, email, direccion, dni } = req.body;
+  const { nombre, telefono, email, direccion, dni, usuario_log_id } = req.body;
 
   if (!nombre) {
     return res.status(400).json({
@@ -60,13 +72,36 @@ export const CR_Cliente_CTS = async (req, res) => {
       direccion,
       dni
     });
+
+    // ---- LOG (no crítico) ----
+    try {
+      const parts = [
+        `creó el cliente "${show(nuevo.nombre)}" (ID #${nuevo.id})`,
+        `DNI: ${show(nuevo.dni)}`,
+        show(nuevo.telefono) !== '-' ? `Tel: ${show(nuevo.telefono)}` : '',
+        show(nuevo.email) !== '-' ? `Email: ${show(nuevo.email)}` : '',
+        show(nuevo.direccion) !== '-' ? `Dir: ${show(nuevo.direccion)}` : ''
+      ].filter(Boolean);
+
+      await registrarLog(
+        req,
+        'clientes',
+        'crear',
+        parts.join(' · '),
+        usuario_log_id || undefined
+      );
+    } catch (e) {
+      console.warn('[registrarLog clientes crear] no crítico:', e.message);
+    }
+    // ---------------------------
+
     res.json({ message: 'Cliente creado correctamente', cliente: nuevo });
   } catch (error) {
     res.status(500).json({ mensajeError: error.message });
   }
 };
 
-// Eliminar un cliente
+// ======================= Eliminar =======================
 export const ER_Cliente_CTS = async (req, res) => {
   const clienteId = req.params.id;
 
@@ -90,6 +125,9 @@ export const ER_Cliente_CTS = async (req, res) => {
       }
     }
 
+    // Traigo antes para log
+    const previo = await ClienteModel.findByPk(clienteId);
+
     const eliminado = await ClienteModel.destroy({
       where: { id: clienteId }
     });
@@ -98,23 +136,85 @@ export const ER_Cliente_CTS = async (req, res) => {
       return res.status(404).json({ mensajeError: 'Cliente no encontrado' });
     }
 
+    // ---- LOG (no crítico) ----
+    try {
+      const usuario_log_id = req.body?.usuario_log_id;
+      const parts = [
+        `eliminó el cliente "${show(previo?.nombre)}" (ID #${clienteId})`,
+        `DNI: ${show(previo?.dni)}`
+      ];
+      await registrarLog(
+        req,
+        'clientes',
+        'eliminar',
+        parts.join(' · '),
+        usuario_log_id || undefined
+      );
+    } catch (e) {
+      console.warn('[registrarLog clientes eliminar] no crítico:', e.message);
+    }
+    // ---------------------------
+
     res.json({ message: 'Cliente eliminado correctamente' });
   } catch (error) {
     res.status(500).json({ mensajeError: error.message });
   }
 };
 
-// Actualizar un cliente
+// ======================= Actualizar =======================
 export const UR_Cliente_CTS = async (req, res) => {
   const { id } = req.params;
 
   try {
+    const anterior = await ClienteModel.findByPk(id);
+    if (!anterior) {
+      return res.status(404).json({ mensajeError: 'Cliente no encontrado' });
+    }
+
     const [updated] = await ClienteModel.update(req.body, {
       where: { id }
     });
 
     if (updated === 1) {
       const actualizado = await ClienteModel.findByPk(id);
+
+      // ---- LOG (no crítico) ----
+      try {
+        const usuario_log_id = req.body?.usuario_log_id;
+
+        // Campos auditables
+        const campos = ['nombre', 'telefono', 'email', 'direccion', 'dni'];
+        const cambios = [];
+
+        for (const campo of campos) {
+          if (Object.prototype.hasOwnProperty.call(req.body, campo)) {
+            const prev = anterior[campo];
+            const next = actualizado[campo];
+            if (`${show(prev)}` !== `${show(next)}`) {
+              cambios.push(
+                `cambió "${fieldLabel[campo]}" de "${show(prev)}" a "${show(next)}"`
+              );
+            }
+          }
+        }
+
+        const parts = [
+          `actualizó el cliente "${show(actualizado.nombre || anterior.nombre)}" (ID #${id})`,
+          cambios.length ? cambios.join(' · ') : 'sin cambios relevantes'
+        ];
+
+        await registrarLog(
+          req,
+          'clientes',
+          'editar',
+          parts.join(' · '),
+          usuario_log_id || undefined
+        );
+      } catch (e) {
+        console.warn('[registrarLog clientes actualizar] no crítico:', e.message);
+      }
+      // ---------------------------
+
       res.json({ message: 'Cliente actualizado correctamente', actualizado });
     } else {
       res.status(404).json({ mensajeError: 'Cliente no encontrado' });
