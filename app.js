@@ -15,7 +15,8 @@ import mysql from 'mysql2/promise'; // Usar mysql2 para las promesas
 import cron from 'node-cron';
 
 import './Models/relaciones.js';
-
+// Importar relaciones
+import './Models/Proveedores/relacionesProveedor.js';
 // CONFIGURACION PRODUCCION
 if (process.env.NODE_ENV !== 'production') {
   dotenv.config();

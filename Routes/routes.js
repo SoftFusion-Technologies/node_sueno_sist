@@ -557,11 +557,137 @@ import {
   ER_PedidoStock_CTS
 } from '../Controllers/Stock/CTS_TB_PedidoStock.js';
 
-
 router.get('/pedidos', OBRS_PedidosStock_CTS);
 router.get('/pedidos/:id', OBR_PedidoStock_CTS);
 router.post('/pedidos', CR_PedidoStock_CTS);
 router.patch('/pedidos/:id/estado', UR_PedidoStock_Estado_CTS);
 router.patch('/pedidos/:id/cantidades', UR_PedidoStock_Cantidades_CTS);
 router.delete('/pedidos/:id', ER_PedidoStock_CTS); // cancelar
+
+// MODULO DE PROVEEDORES INI
+// -------------------------
+
+import {
+  OBRS_Proveedores_CTS,
+  OBR_Proveedor_CTS,
+  CR_Proveedor_CTS,
+  UR_Proveedor_CTS,
+  ER_Proveedor_CTS,
+  SEARCH_Proveedores_CTS,
+  OBRS_ProveedoresInactivos_CTS,
+  Estado_Proveedor_CTS
+} from '../Controllers/Proveedores/CTS_TB_Proveedores.js';
+
+router.get('/proveedores', OBRS_Proveedores_CTS);
+router.get('/proveedores/search', SEARCH_Proveedores_CTS);
+router.get('/proveedores/inactivos', OBRS_ProveedoresInactivos_CTS);
+router.get('/proveedores/:id', OBR_Proveedor_CTS);
+
+router.post('/proveedores', CR_Proveedor_CTS);
+router.put('/proveedores/:id', UR_Proveedor_CTS);
+router.patch('/proveedores/:id/estado', Estado_Proveedor_CTS);
+router.delete('/proveedores/:id', ER_Proveedor_CTS);
+
+
+import {
+  OBRS_ProveedorContactos_CTS,
+  OBR_ProveedorContacto_CTS,
+  CR_ProveedorContacto_CTS,
+  UR_ProveedorContacto_CTS,
+  ER_ProveedorContacto_CTS,
+  SetPrincipal_ProveedorContacto_CTS,
+  SEARCH_ProveedorContactos_CTS
+} from '../Controllers/Proveedores/CTS_TB_ProveedorContactos.js';
+
+// Listar contactos de un proveedor
+router.get('/proveedores/:proveedorId/contactos', OBRS_ProveedorContactos_CTS);
+
+// CRUD básico
+router.get('/proveedores/contactos/:id', OBR_ProveedorContacto_CTS);
+router.post('/proveedores/:proveedorId/contactos', CR_ProveedorContacto_CTS);
+router.put('/proveedores/contactos/:id', UR_ProveedorContacto_CTS);
+router.delete('/proveedores/contactos/:id', ER_ProveedorContacto_CTS);
+
+// Contacto principal
+router.patch(
+  '/proveedores/contactos/:id/principal',
+  SetPrincipal_ProveedorContacto_CTS
+);
+
+// Búsqueda rápida
+router.get('/proveedores/contactos/search', SEARCH_ProveedorContactos_CTS);
+
+import {
+  OBRS_ProveedorCuentas_CTS,
+  OBR_ProveedorCuenta_CTS,
+  CR_ProveedorCuenta_CTS,
+  UR_ProveedorCuenta_CTS,
+  ER_ProveedorCuenta_CTS,
+  SetPredeterminada_ProveedorCuenta_CTS,
+  SEARCH_ProveedorCuentas_CTS
+} from '../Controllers/Proveedores/CTS_TB_ProveedorCuentasBancarias.js';
+
+// Listar cuentas de un proveedor
+router.get('/proveedores/:proveedorId/cuentas', OBRS_ProveedorCuentas_CTS);
+
+// CRUD básico
+router.get('/proveedores/cuentas/:id', OBR_ProveedorCuenta_CTS);
+router.post('/proveedores/:proveedorId/cuentas', CR_ProveedorCuenta_CTS);
+router.put('/proveedores/cuentas/:id', UR_ProveedorCuenta_CTS);
+router.delete('/proveedores/cuentas/:id', ER_ProveedorCuenta_CTS);
+
+// Marcar cuenta predeterminada
+router.patch('/proveedores/cuentas/:id/predeterminada', SetPredeterminada_ProveedorCuenta_CTS);
+
+// Búsqueda rápida
+router.get('/proveedores/cuentas/search', SEARCH_ProveedorCuentas_CTS);
+
+import {
+  OBRS_ProductoProveedor_CTS,
+  OBR_ProductoProveedor_CTS,
+  CR_ProductoProveedor_CTS,
+  UR_ProductoProveedor_CTS,
+  ER_ProductoProveedor_CTS,
+  SetVigente_ProductoProveedor_CTS,
+  SEARCH_ProductoProveedor_CTS
+} from '../Controllers/Proveedores/CTS_TB_ProductoProveedor.js';
+
+router.get('/producto-proveedor', OBRS_ProductoProveedor_CTS);
+router.get('/producto-proveedor/search', SEARCH_ProductoProveedor_CTS);
+router.get('/producto-proveedor/:id', OBR_ProductoProveedor_CTS);
+
+router.post('/producto-proveedor', CR_ProductoProveedor_CTS);
+router.put('/producto-proveedor/:id', UR_ProductoProveedor_CTS);
+router.patch(
+  '/producto-proveedor/:id/vigente',
+  SetVigente_ProductoProveedor_CTS
+);
+router.delete('/producto-proveedor/:id', ER_ProductoProveedor_CTS);
+
+import {
+  OBRS_PPH_CTS,
+  OBR_PPH_CTS,
+  CR_PPH_CTS,
+  ER_PPH_CTS,
+  OBR_PPH_Ultimo_CTS
+} from '../Controllers/Proveedores/CTS_TB_ProductoProveedorHistorialCostos.js';
+
+// Listar historial por PP (con filtros de fecha/paginación)
+router.get('/producto-proveedor/:ppId/historial', OBRS_PPH_CTS);
+
+// Último registro de historial
+router.get('/producto-proveedor/:ppId/historial/ultimo', OBR_PPH_Ultimo_CTS);
+
+// Obtener un historial por ID
+router.get('/producto-proveedor/historial/:id', OBR_PPH_CTS);
+
+// Crear historial (opcionalmente aplicando al PP)
+router.post('/producto-proveedor/:ppId/historial', CR_PPH_CTS);
+
+// Eliminar historial
+router.delete('/producto-proveedor/historial/:id', ER_PPH_CTS);
+
+// MODULO DE PROVEDORES FIN
+// -------------------------
+
 export default router;

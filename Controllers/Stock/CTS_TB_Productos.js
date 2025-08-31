@@ -11,6 +11,7 @@
 // Importar modelo de productos y categoría
 import MD_TB_Productos from '../../Models/Stock/MD_TB_Productos.js';
 const ProductosModel = MD_TB_Productos.ProductosModel;
+import { ProveedoresModel } from '../../Models/Proveedores/MD_TB_Proveedores.js';
 
 import { CategoriasModel } from '../../Models/Stock/MD_TB_Categorias.js';
 import { StockModel } from '../../Models/Stock/MD_TB_Stock.js';
@@ -90,7 +91,8 @@ export const CR_Producto_CTS = async (req, res) => {
     modelo,
     medida,
     codigo_sku,
-    usuario_log_id // ⬅️ lo tomamos de req.body
+    proveedor_preferido_id, // ⬅️ puede venir '', null o un id válido
+    usuario_log_id
   } = req.body;
 
   try {
@@ -105,6 +107,21 @@ export const CR_Producto_CTS = async (req, res) => {
 
     const skuGenerado = codigo_sku || generarSKU({ marca, modelo, medida });
 
+    // Normalizamos a null si viene vacío
+    const provPrefId = proveedor_preferido_id
+      ? Number(proveedor_preferido_id)
+      : null;
+
+    // (Opcional) validar existencia del proveedor si se envió
+    if (provPrefId) {
+      const prov = await ProveedoresModel.findByPk(provPrefId);
+      if (!prov) {
+        return res
+          .status(400)
+          .json({ mensajeError: 'proveedor_preferido_id inválido' });
+      }
+    }
+
     const nuevo = await ProductosModel.create({
       nombre,
       descripcion,
@@ -117,16 +134,15 @@ export const CR_Producto_CTS = async (req, res) => {
       marca,
       modelo,
       medida,
-      codigo_sku: skuGenerado
+      codigo_sku: skuGenerado,
+      proveedor_preferido_id: provPrefId // ⬅️ guardamos (nullable)
     });
-
-    const descripcionLog = `creó el producto "${nombre}" con SKU "${skuGenerado}"`;
 
     await registrarLog(
       req,
       'productos',
       'crear',
-      descripcionLog,
+      `creó el producto "${nombre}" con SKU "${skuGenerado}"`,
       usuario_log_id
     );
 
@@ -203,9 +219,9 @@ export const ER_Producto_CTS = async (req, res) => {
       } catch {}
 
       const teniaStock = forzado || countStock > 0;
-      const descripcionLog = `${quien} eliminó el producto "${producto.nombre}" ${
-        teniaStock ? 'que tenía stock ' : ''
-      }(SKU "${producto.codigo_sku}")`;
+      const descripcionLog = `${quien} eliminó el producto "${
+        producto.nombre
+      }" ${teniaStock ? 'que tenía stock ' : ''}(SKU "${producto.codigo_sku}")`;
 
       await registrarLog(
         req,
@@ -232,12 +248,13 @@ export const ER_Producto_CTS = async (req, res) => {
         reason: 'FK_COMBO'
       });
     }
-    try { await tx.rollback(); } catch {}
+    try {
+      await tx.rollback();
+    } catch {}
     console.error('❌ Error en ER_Producto_CTS:', error);
     return res.status(500).json({ mensajeError: error.message });
   }
 };
-
 
 // Actualizar un producto
 export const UR_Producto_CTS = async (req, res) => {
@@ -254,7 +271,8 @@ export const UR_Producto_CTS = async (req, res) => {
     modelo,
     medida,
     codigo_sku,
-    usuario_log_id // 👈 lo recibimos desde el frontend
+    proveedor_preferido_id, // ⬅️ NUEVO
+    usuario_log_id
   } = req.body;
 
   try {
@@ -272,26 +290,21 @@ export const UR_Producto_CTS = async (req, res) => {
         ? parseFloat((precioNum - precioNum * (descuentoNum / 100)).toFixed(2))
         : precioNum;
 
-    // Actualización
-    await ProductosModel.update(
-      {
-        nombre,
-        descripcion,
-        categoria_id,
-        precio: precioNum,
-        descuento_porcentaje: descuentoNum > 0 ? descuentoNum : null,
-        precio_con_descuento: precioConDescuento,
-        imagen_url,
-        estado,
-        marca,
-        modelo,
-        medida,
-        codigo_sku
-      },
-      { where: { id } }
-    );
+    // Normalizamos a null si viene vacío
+    const provPrefId = proveedor_preferido_id
+      ? Number(proveedor_preferido_id)
+      : null;
 
-    // Comparar cambios para el log
+    // (Opcional) validar existencia del proveedor si se envió
+    if (provPrefId) {
+      const prov = await ProveedoresModel.findByPk(provPrefId);
+      if (!prov) {
+        return res
+          .status(400)
+          .json({ mensajeError: 'proveedor_preferido_id inválido' });
+      }
+    }
+
     const campos = {
       nombre,
       descripcion,
@@ -304,15 +317,17 @@ export const UR_Producto_CTS = async (req, res) => {
       marca,
       modelo,
       medida,
-      codigo_sku
+      codigo_sku,
+      proveedor_preferido_id: provPrefId // ⬅️ incluimos en update
     };
 
-    const cambios = [];
+    await ProductosModel.update(campos, { where: { id } });
 
-    for (const key in campos) {
+    // Auditoría de cambios (incluye preferido)
+    const cambios = [];
+    for (const key of Object.keys(campos)) {
       const original = productoOriginal[key];
       const nuevo = campos[key];
-
       if (`${original}` !== `${nuevo}`) {
         cambios.push(
           `- ${key} de '${original ?? 'null'}' a '${nuevo ?? 'null'}'`
@@ -321,15 +336,13 @@ export const UR_Producto_CTS = async (req, res) => {
     }
 
     if (cambios.length > 0) {
-      const descripcionLog = `actualizó el producto "${
-        productoOriginal.nombre
-      }" (ID: ${productoOriginal.id}):\n${cambios.join('\n')}`;
-
       await registrarLog(
         req,
         'productos',
         'editar',
-        descripcionLog,
+        `actualizó el producto "${productoOriginal.nombre}" (ID: ${
+          productoOriginal.id
+        }):\n${cambios.join('\n')}`,
         usuario_log_id
       );
     }

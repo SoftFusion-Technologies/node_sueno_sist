@@ -14,6 +14,7 @@
 import dotenv from 'dotenv';
 import db from '../../DataBase/db.js';
 import { DataTypes } from 'sequelize';
+import { ProveedoresModel } from '../Proveedores/MD_TB_Proveedores.js';
 
 if (process.env.NODE_ENV !== 'production') {
   dotenv.config();
@@ -79,6 +80,10 @@ export const ProductosModel = db.define(
     estado: {
       type: DataTypes.ENUM('activo', 'inactivo'),
       defaultValue: 'activo'
+    },
+    proveedor_preferido_id: {
+      type: DataTypes.INTEGER,
+      allowNull: true
     }
   },
   {
@@ -87,6 +92,11 @@ export const ProductosModel = db.define(
     updatedAt: 'updated_at'
   }
 );
+
+ProductosModel.belongsTo(ProveedoresModel, {
+  as: 'proveedor_preferido',
+  foreignKey: 'proveedor_preferido_id'
+});
 
 export default {
   ProductosModel
