@@ -20,6 +20,14 @@ import axios from 'axios';
 import { Op } from 'sequelize';
 import { ComboProductosPermitidosModel } from '../../Models/Combos/MD_TB_ComboProductosPermitidos.js';
 import { registrarLog } from '../../Helpers/registrarLog.js';
+import { PedidoStockModel } from '../../Models/Stock/MD_TB_PedidoStock.js';
+import { ProductoProveedorModel } from '../../Models/Proveedores/MD_TB_ProductoProveedor.js';
+
+const getProvDisplayName = (prov) =>
+  (prov?.nombre_fantasia && prov.nombre_fantasia.trim()) ||
+  (prov?.razon_social && prov.razon_social.trim()) ||
+  (prov?.id ? `Proveedor #${prov.id}` : null);
+
 // Obtener todos los productos con categoría incluida
 export const OBRS_Productos_CTS = async (req, res) => {
   try {
@@ -157,104 +165,165 @@ export const CR_Producto_CTS = async (req, res) => {
 // Controllers/Stock/CTS_TB_Productos.js
 export const ER_Producto_CTS = async (req, res) => {
   const { id } = req.params;
-  const body = req.body || {};
-  const usuario_log_id = body.usuario_log_id ?? null;
-  const forzado = !!body.forzado;
+  const { usuario_log_id = null, forzado = false } = req.body || {};
 
-  const tx = await db.transaction();
   try {
-    const producto = await ProductosModel.findByPk(id, { transaction: tx });
+    // ---------- Pre-chequeos fuera de TX ----------
+    // Incluimos al proveedor preferido para tener el nombre listo
+    const producto = await ProductosModel.findByPk(id, {
+      include: [
+        {
+          model: ProveedoresModel,
+          as: 'proveedor_preferido',
+          attributes: ['id', 'razon_social', 'nombre_fantasia', 'estado']
+        }
+      ]
+    });
     if (!producto) {
-      await tx.rollback();
       return res.status(404).json({ mensajeError: 'Producto no encontrado' });
     }
 
-    // 1) ¿El producto está en combos?
-    const countEnCombos = await ComboProductosPermitidosModel.count({
-      where: { producto_id: id },
-      transaction: tx
+    // 1) Combos
+    const combosCount = await ComboProductosPermitidosModel.count({
+      where: { producto_id: id }
     });
-    if (countEnCombos > 0) {
-      await tx.rollback();
+    if (combosCount > 0) {
       return res.status(409).json({
         mensajeError:
-          'No es posible borrar el producto porque está asignado a uno o más combos. ' +
-          'Primero elimínalo de esos combos y luego podrás borrarlo.',
+          'No es posible borrar el producto porque está asignado a uno o más COMBOS. ' +
+          'Quitalo de esos combos y volvé a intentar.',
         reason: 'FK_COMBO',
-        combos_count: countEnCombos
+        combos_count: combosCount
       });
     }
 
-    // 2) ¿Tiene stock?
-    const countStock = await StockModel.count({
-      where: { producto_id: id },
-      transaction: tx
+    // 2) Pedidos de stock
+    const pedidosCount = await PedidoStockModel.count({
+      where: { producto_id: id }
     });
-
-    if (countStock > 0 && !forzado) {
-      await tx.rollback();
+    if (pedidosCount > 0) {
       return res.status(409).json({
         mensajeError:
-          'Este PRODUCTO tiene stock asociado. ¿Desea eliminarlo de todas formas incluyendo el stock?',
+          'No es posible borrar el producto porque está referenciado por PEDIDOS DE STOCK. ' +
+          'Eliminá/actualizá esos pedidos primero.',
+        reason: 'FK_PEDIDOS',
+        pedidos_count: pedidosCount
+      });
+    }
+
+    // 3) Stock
+    const stockCount = await StockModel.count({ where: { producto_id: id } });
+    if (stockCount > 0 && !forzado) {
+      return res.status(409).json({
+        mensajeError:
+          'Este producto tiene STOCK asociado. ¿Eliminarlo de todas formas incluyendo el stock?',
         reason: 'HAS_STOCK',
-        stock_count: countStock
+        stock_count: stockCount
       });
     }
 
-    if (countStock > 0 && forzado) {
-      await StockModel.destroy({ where: { producto_id: id }, transaction: tx });
-    }
+    // 4) Proveedor preferido → solo aviso UX (no bloquea)
+   if (producto.proveedor_preferido_id && !forzado) {
+     // 👇 usar el alias real del include
+     const provName = getProvDisplayName(producto.proveedor_preferido);
+     return res.status(409).json({
+       mensajeError: `El producto "${
+         producto.nombre
+       }" está asociado al proveedor "${
+         provName ?? 'Desconocido'
+       }". ¿Querés continuar de todas formas?`,
+       reason: 'HAS_PROVEEDOR',
+       proveedor_id: producto.proveedor_preferido_id,
+       proveedor_nombre: provName ?? null
+     });
+   }
 
-    await ProductosModel.destroy({ where: { id }, transaction: tx });
-    await tx.commit();
-
-    // ---- Log fuera de la tx ----
+    // ---------- Tramo destructivo en TX corta ----------
+    const tx = await db.transaction();
     try {
-      let quien = `Usuario ${usuario_log_id ?? 'desconocido'}`;
+      // Lock explícito
+      await ProductosModel.findOne({
+        where: { id },
+        lock: tx.LOCK.UPDATE,
+        transaction: tx
+      });
+
+      if (stockCount > 0 && forzado) {
+        await StockModel.destroy({
+          where: { producto_id: id },
+          transaction: tx
+        });
+      }
+
+      // Limpiar puente producto_proveedor (RESTRICT)
+      await ProductoProveedorModel.destroy({
+        where: { producto_id: id },
+        transaction: tx
+      });
+
+      await ProductosModel.destroy({ where: { id }, transaction: tx });
+
+      await tx.commit();
+
+      // Log fuera de TX
       try {
-        const u = usuario_log_id
-          ? await UsuariosModel.findByPk(usuario_log_id)
-          : null;
-        if (u?.nombre) quien = u.nombre;
+        let quien = `Usuario ${usuario_log_id ?? 'desconocido'}`;
+        if (usuario_log_id) {
+          const u = await UsuariosModel.findByPk(usuario_log_id);
+          if (u?.nombre) quien = u.nombre;
+        }
+        const teniaStock = forzado || stockCount > 0;
+        const descripcionLog = `${quien} eliminó el producto "${
+          producto.nombre
+        }" ${teniaStock ? 'incluyendo el stock ' : ''}(SKU "${
+          producto.codigo_sku
+        }")`;
+        await registrarLog(
+          req,
+          'productos',
+          'eliminar',
+          descripcionLog,
+          usuario_log_id
+        );
+      } catch (logErr) {
+        console.warn('registrarLog falló:', logErr?.message || logErr);
+      }
+
+      return res.json({ message: 'Producto eliminado correctamente' });
+    } catch (err) {
+      try {
+        await tx.rollback();
       } catch {}
+      const code = err?.original?.code || err?.parent?.code;
 
-      const teniaStock = forzado || countStock > 0;
-      const descripcionLog = `${quien} eliminó el producto "${
-        producto.nombre
-      }" ${teniaStock ? 'que tenía stock ' : ''}(SKU "${producto.codigo_sku}")`;
+      if (code === 'ER_LOCK_WAIT_TIMEOUT') {
+        return res.status(409).json({
+          mensajeError:
+            'No se pudo eliminar por contención de bloqueo (timeout). Cerrá otras pantallas/procesos que estén usando este producto e intentá nuevamente.',
+          reason: 'LOCK_TIMEOUT'
+        });
+      }
+      if (
+        code === 'ER_ROW_IS_REFERENCED_2' ||
+        code === 'ER_ROW_IS_REFERENCED'
+      ) {
+        return res.status(409).json({
+          mensajeError:
+            'No es posible borrar el producto porque está referenciado por otras tablas (combos/pedidos/stock/u otras). ' +
+            'Quitá esas referencias primero.',
+          reason: 'FK_REF'
+        });
+      }
 
-      await registrarLog(
-        req,
-        'productos',
-        'eliminar',
-        descripcionLog,
-        usuario_log_id
-      );
-    } catch (logErr) {
-      console.warn('registrarLog falló:', logErr?.message || logErr);
+      console.error('❌ Error en ER_Producto_CTS (tx):', err);
+      return res.status(500).json({ mensajeError: err.message });
     }
-
-    return res.json({ message: 'Producto eliminado correctamente' });
   } catch (error) {
-    // fallback por si en el medio falla por FK:
-    if (
-      error?.parent?.code === 'ER_ROW_IS_REFERENCED_2' ||
-      error?.original?.code === 'ER_ROW_IS_REFERENCED_2'
-    ) {
-      return res.status(409).json({
-        mensajeError:
-          'No es posible borrar el producto porque está asignado a uno o más combos. ' +
-          'Primero elimínalo de esos combos y luego podrás borrarlo.',
-        reason: 'FK_COMBO'
-      });
-    }
-    try {
-      await tx.rollback();
-    } catch {}
     console.error('❌ Error en ER_Producto_CTS:', error);
     return res.status(500).json({ mensajeError: error.message });
   }
 };
+
 
 // Actualizar un producto
 export const UR_Producto_CTS = async (req, res) => {

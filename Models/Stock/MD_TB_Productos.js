@@ -95,7 +95,9 @@ export const ProductosModel = db.define(
 
 ProductosModel.belongsTo(ProveedoresModel, {
   as: 'proveedor_preferido',
-  foreignKey: 'proveedor_preferido_id'
+  foreignKey: 'proveedor_preferido_id',
+  onDelete: 'SET NULL',
+  onUpdate: 'CASCADE'
 });
 
 export default {
