@@ -130,12 +130,10 @@ export const CR_ProductoProveedor_CTS = async (req, res) => {
   const usuario_log_id = body?.usuario_log_id;
 
   if (!body.producto_id || !body.proveedor_id || body.costo_neto == null) {
-    return res
-      .status(400)
-      .json({
-        mensajeError:
-          'Faltan campos obligatorios: producto_id, proveedor_id, costo_neto'
-      });
+    return res.status(400).json({
+      mensajeError:
+        'Faltan campos obligatorios: producto_id, proveedor_id, costo_neto'
+    });
   }
 
   try {
@@ -177,19 +175,29 @@ export const CR_ProductoProveedor_CTS = async (req, res) => {
         );
       }
 
-      // Registrar historial inicial
-      await ProductoProveedorHistorialCostosModel.create(
-        {
-          producto_proveedor_id: nuevo.id,
-          costo_neto: nuevo.costo_neto,
-          moneda: nuevo.moneda,
-          alicuota_iva: nuevo.alicuota_iva,
-          descuento_porcentaje: nuevo.descuento_porcentaje,
-          motivo: body.motivo || 'Alta relación',
-          observaciones: body.observaciones_hist || null
-        },
-        { transaction: t }
-      );
+      // ✅ Registrar historial inicial SOLO si corresponde
+      const registrarHistorialInicial =
+        // bandera explícita desde el front
+        body.registrar_historial_inicial === true ||
+        // o si vino un costo > 0
+        Number(body.costo_neto) > 0 ||
+        // o si vino un motivo intencional
+        (typeof body.motivo === 'string' && body.motivo.trim() !== '');
+
+      if (registrarHistorialInicial) {
+        await ProductoProveedorHistorialCostosModel.create(
+          {
+            producto_proveedor_id: nuevo.id,
+            costo_neto: nuevo.costo_neto,
+            moneda: nuevo.moneda,
+            alicuota_iva: nuevo.alicuota_iva,
+            descuento_porcentaje: nuevo.descuento_porcentaje,
+            motivo: (body.motivo && body.motivo.trim()) || 'Alta relación',
+            observaciones: body.observaciones_hist || null
+          },
+          { transaction: t }
+        );
+      }
     });
 
     // LOG (no crítico)
@@ -217,6 +225,7 @@ export const CR_ProductoProveedor_CTS = async (req, res) => {
     res.status(500).json({ mensajeError: error.message });
   }
 };
+
 
 /* =======================
    ACTUALIZAR
