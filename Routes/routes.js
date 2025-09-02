@@ -341,7 +341,8 @@ import {
   CR_MovimientoCaja_CTS,
   ER_MovimientoCaja_CTS,
   UR_MovimientoCaja_CTS,
-  OBRS_MovimientosCajaByCajaId_CTS
+  OBRS_MovimientosCajaByCajaId_CTS,
+  OBRS_MovimientosCajaByCajaId_V2_CTS
 } from '../Controllers/Ventas/CTS_TB_MovimientosCaja.js';
 
 // ----------------------------------------------------------------
@@ -354,6 +355,10 @@ router.post('/movimientos_caja', CR_MovimientoCaja_CTS); // Crear movimiento nue
 router.delete('/movimientos_caja/:id', ER_MovimientoCaja_CTS); // Eliminar movimiento por ID
 router.put('/movimientos_caja/:id', UR_MovimientoCaja_CTS); // Actualizar movimiento por ID
 router.get('/movimientos/caja/:caja_id', OBRS_MovimientosCajaByCajaId_CTS); // Actualizar movimiento por ID
+router.get(
+  '/movimientosv2/caja/:caja_id',
+  OBRS_MovimientosCajaByCajaId_V2_CTS
+);
 
 import {
   OBRS_MediosPagoCuotas_CTS,
