@@ -17,6 +17,15 @@ import cron from 'node-cron';
 import './Models/relaciones.js';
 // Importar relaciones
 import './Models/Proveedores/relacionesProveedor.js';
+
+import { timeRouter } from './Routes/time.routes.js';
+import { timeGuard } from './Middlewares/timeGuard.js';
+import { initAuthoritativeTime } from './Utils/authoritativeTime.js';
+// ...
+await initAuthoritativeTime?.();  // si tu Node permite top-level await
+// o:
+// initAuthoritativeTime();
+
 // CONFIGURACION PRODUCCION
 if (process.env.NODE_ENV !== 'production') {
   dotenv.config();
@@ -27,8 +36,47 @@ if (process.env.NODE_ENV !== 'production') {
 // console.log(process.env.PORT)
 
 const app = express();
-app.use(cors()); // aca configuramos cors para no tener errores
+
+/* 🔑 CORS configurado con whitelist y credenciales */
+const CORS_WHITELIST = [
+  'http://localhost:5173',
+  'http://127.0.0.1:5173'
+];
+
+const corsOptions = {
+  origin: function (origin, callback) {
+    // permitir también requests sin origin (ej. curl, Postman)
+    if (!origin || CORS_WHITELIST.includes(origin)) {
+      return callback(null, true);
+    }
+    return callback(new Error('Not allowed by CORS'));
+  },
+  credentials: true, // 👈 permite cookies y headers con credentials: 'include'
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: [
+    'Content-Type',
+    'Authorization',
+    'x-client-reported-time',
+    'x-time-guard-reason'
+  ]
+};
+
+app.use(cors(corsOptions));
+// app.options('*', cors(corsOptions)); // manejar preflight
+
 app.use(express.json());
+
+// 👉 Montamos /time ANTES o DESPUÉS de GetRoutes; es un GET exacto y no interfiere
+app.use(timeRouter); // <-- NUEVO
+
+app.use(
+  timeGuard([
+    '/ventas', // ej: POST /ventas, GET
+    '/caja',
+    '/movimientos', // si tenés endpoints de caja/movimientos
+    '/stock' // operaciones de stock
+  ])
+);
 app.use('/', GetRoutes);
 // definimos la conexion
 
@@ -48,6 +96,21 @@ const pool = mysql.createPool({
   password: '123456', // Configurar según tu base de datos
   database: 'DB_SuenoDESA_03082025'
 });
+
+// Forzar sesión en UTC
+(async () => {
+  try {
+    const conn = await pool.getConnection();
+    await conn.query("SET time_zone = '+00:00'");
+    conn.release();
+    console.log('MySQL session time_zone establecido en UTC (+00:00)');
+  } catch (e) {
+    console.error(
+      'No se pudo setear time_zone en UTC para MySQL session:',
+      e.message
+    );
+  }
+})();
 
 // Ruta de login
 app.post('/login', login);
@@ -241,7 +304,6 @@ app.get('/ventas-historial', async (req, res) => {
     res.status(500).json({ mensajeError: err.message });
   }
 });
-
 
 // GET /ventas/:id/detalle
 app.get('/ventas/:id/detalle', async (req, res) => {
