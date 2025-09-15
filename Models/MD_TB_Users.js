@@ -58,6 +58,12 @@ export const UserModel = db.define(
         key: 'id'
       }
     },
+    es_reemplazante: {
+      type: DataTypes.BOOLEAN,
+      allowNull: false,
+      defaultValue: false,
+      comment: 'Indica si el usuario está habilitado como reemplazante'
+    },
     created_at: {
       type: DataTypes.DATE,
       defaultValue: DataTypes.NOW

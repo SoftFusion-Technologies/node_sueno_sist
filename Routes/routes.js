@@ -189,9 +189,9 @@ router.post(
 // ----------------------------------------------------------------
 
 router.post('/usuarios', authenticateToken, CR_Usuario_CTS);
-router.put('/usuarios/:id', authenticateToken, UR_Usuario_CTS);
+router.put('/usuarios/:id', UR_Usuario_CTS);
 router.delete('/usuarios/:id', authenticateToken, ER_Usuario_CTS);
-router.get('/usuarios', authenticateToken, OBRS_Usuarios_CTS);
+router.get('/usuarios', OBRS_Usuarios_CTS);
 
 // ----------------------------------------------------------------
 // Rutas para operaciones CRUD en la tabla 'clientes'
