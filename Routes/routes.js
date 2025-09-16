@@ -189,9 +189,9 @@ router.post(
 // ----------------------------------------------------------------
 
 router.post('/usuarios', authenticateToken, CR_Usuario_CTS);
-router.put('/usuarios/:id', UR_Usuario_CTS);
+router.put('/usuarios/:id', authenticateToken, UR_Usuario_CTS);
 router.delete('/usuarios/:id', authenticateToken, ER_Usuario_CTS);
-router.get('/usuarios', OBRS_Usuarios_CTS);
+router.get('/usuarios', authenticateToken, OBRS_Usuarios_CTS);
 
 // ----------------------------------------------------------------
 // Rutas para operaciones CRUD en la tabla 'clientes'
@@ -230,7 +230,11 @@ import {
 } from '../Controllers/Ventas/ventasControllerPOS.js';
 router.get('/buscar-productos', buscarItemsVenta);
 router.get('/buscar-productos-agrupados', buscarItemsVentaAgrupado);
-router.get('/buscar-productos-detallado', buscarItemsVentaDetallado);
+router.get(
+  '/buscar-productos-detallado',
+  authenticateToken,
+  buscarItemsVentaDetallado
+);
 router.post('/ventas/pos', registrarVenta);
 router.get('/ventas/:id/detalle', OBR_VentaDetalle_CTS);
 router.put('/ventas/:id/anular', anularVenta);
@@ -355,10 +359,7 @@ router.post('/movimientos_caja', CR_MovimientoCaja_CTS); // Crear movimiento nue
 router.delete('/movimientos_caja/:id', ER_MovimientoCaja_CTS); // Eliminar movimiento por ID
 router.put('/movimientos_caja/:id', UR_MovimientoCaja_CTS); // Actualizar movimiento por ID
 router.get('/movimientos/caja/:caja_id', OBRS_MovimientosCajaByCajaId_CTS); // Actualizar movimiento por ID
-router.get(
-  '/movimientosv2/caja/:caja_id',
-  OBRS_MovimientosCajaByCajaId_V2_CTS
-);
+router.get('/movimientosv2/caja/:caja_id', OBRS_MovimientosCajaByCajaId_V2_CTS);
 
 import {
   OBRS_MediosPagoCuotas_CTS,
@@ -593,7 +594,6 @@ router.put('/proveedores/:id', UR_Proveedor_CTS);
 router.patch('/proveedores/:id/estado', Estado_Proveedor_CTS);
 router.delete('/proveedores/:id', ER_Proveedor_CTS);
 
-
 import {
   OBRS_ProveedorContactos_CTS,
   OBR_ProveedorContacto_CTS,
@@ -642,7 +642,10 @@ router.put('/proveedores/cuentas/:id', UR_ProveedorCuenta_CTS);
 router.delete('/proveedores/cuentas/:id', ER_ProveedorCuenta_CTS);
 
 // Marcar cuenta predeterminada
-router.patch('/proveedores/cuentas/:id/predeterminada', SetPredeterminada_ProveedorCuenta_CTS);
+router.patch(
+  '/proveedores/cuentas/:id/predeterminada',
+  SetPredeterminada_ProveedorCuenta_CTS
+);
 
 // Búsqueda rápida
 router.get('/proveedores/cuentas/search', SEARCH_ProveedorCuentas_CTS);

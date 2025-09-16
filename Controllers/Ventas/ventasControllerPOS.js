@@ -27,6 +27,8 @@ import { ComboProductosPermitidosModel } from '../../Models/Combos/MD_TB_ComboPr
 
 import { registrarLog } from '../../Helpers/registrarLog.js';
 
+import jwt from 'jsonwebtoken';
+
 const WIDTHS_SKU = {
   prod: 5,
   local: 3,
@@ -161,15 +163,31 @@ export const buscarItemsVentaAgrupado = async (req, res) => {
   }
 };
 
-/** 3. Búsqueda detallada con talles y stock para selección exacta */
+/** 3. Búsqueda detallada stock para selección exacta */
 export const buscarItemsVentaDetallado = async (req, res) => {
   const { query, combo_id } = req.query;
   const q = String(query ?? '').trim();
   const isNumeric = q && !isNaN(Number(q));
   const isNumericSku = /^\d{15}$/.test(q);
 
-  const localId = Number(req.query.local_id || 0);
+  const localIdFromQuery = Number(req.query.local_id || 0);
   const includeOtros = String(req.query.include_otros || '0') === '1';
+
+  // 🔓 Leer JWT de forma opcional (ruta NO protegida)
+  let esReemplazante = false;
+  let userLocalId = 0;
+  try {
+    const auth = req.headers?.authorization || '';
+    const token = auth.startsWith('Bearer ') ? auth.slice(7) : '';
+    if (token) {
+      // usa la misma secret que en login
+      const payload = jwt.verify(token, process.env.JWT_SECRET || 'softfusion');
+      esReemplazante = !!payload.es_reemplazante;
+      userLocalId = Number(payload.local_id || 0);
+    }
+  } catch (_) {
+    // si falla el token, ignoramos y seguimos sin modificar el comportamiento
+  }
 
   try {
     let productosPermitidos = [];
@@ -187,10 +205,16 @@ export const buscarItemsVentaDetallado = async (req, res) => {
         .map((p) => p.categoria_id);
     }
 
-    // where base (local si viene)
+    // 🧠 Si es reemplazante => NO filtramos por local (ve todo)
+    // Si no lo es => usamos local de token o de query si vino
+    const effectiveLocalId = esReemplazante
+      ? 0
+      : userLocalId || localIdFromQuery || 0;
+
+    // where base (local sólo si corresponde)
     let whereStock = {
       cantidad: { [Op.gt]: 0 },
-      ...(localId ? { local_id: localId } : {})
+      ...(effectiveLocalId ? { local_id: effectiveLocalId } : {})
     };
 
     if (isNumericSku) {
@@ -200,6 +224,8 @@ export const buscarItemsVentaDetallado = async (req, res) => {
           producto_id: ids.producto_id,
           lugar_id: ids.lugar_id,
           estado_id: ids.estado_id
+          // si tu SKU codifica local y querés respetarlo, podés agregar:
+          // local_id: ids.local_id
         });
       } catch {
         return res.json([]); // SKU inválido
@@ -228,7 +254,6 @@ export const buscarItemsVentaDetallado = async (req, res) => {
       ];
     }
 
-    // 🔹 include con producto + locale (para nombre de la sucursal)
     const baseInclude = [
       {
         model: ProductosModel,
@@ -245,7 +270,7 @@ export const buscarItemsVentaDetallado = async (req, res) => {
       {
         model: LocalesModel,
         as: 'locale',
-        attributes: ['id', 'nombre', 'codigo', 'direccion'] // lo que quieras exponer
+        attributes: ['id', 'nombre', 'codigo', 'direccion']
       }
     ];
 
@@ -270,22 +295,23 @@ export const buscarItemsVentaDetallado = async (req, res) => {
       codigo_sku: s.codigo_sku,
       categoria_id: s.producto.categoria_id,
       local_id: s.local_id,
-      local_nombre: s.locale?.nombre || null, // 👈 aquí
-      local_codigo: s.locale?.codigo || null, // 👈 opcional
-      local_direccion: s.locale?.direccion || null // 👈 opcional
+      local_nombre: s.locale?.nombre || null,
+      local_codigo: s.locale?.codigo || null,
+      local_direccion: s.locale?.direccion || null
     });
 
     const respLocal = itemsLocal.map(mapItem);
 
-    // 👉 Si no piden otros o no hay localId, respondemos como siempre (array)
-    if (!includeOtros || !localId) {
+    // Si NO piden otros o NO hay local efectivo → devolver array simple
+    // (Para reemplazante, effectiveLocalId=0 ⇒ entra acá y ya ve TODO)
+    if (!includeOtros || !effectiveLocalId) {
       return res.json(respLocal);
     }
 
-    // 🔎 Buscar en otras sucursales (mismo criterio, excluyendo la mía)
+    // Otros locales (excluyendo el effectiveLocalId)
     const whereOtros = {
       cantidad: { [Op.gt]: 0 },
-      local_id: { [Op.ne]: localId }
+      local_id: { [Op.ne]: effectiveLocalId }
     };
 
     if (isNumericSku) {
@@ -327,7 +353,6 @@ export const buscarItemsVentaDetallado = async (req, res) => {
 
     const respOtros = itemsOtros.map(mapItem);
 
-    // 🧾 Respuesta enriquecida
     return res.json({
       items_local: respLocal,
       otros_items: respOtros

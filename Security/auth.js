@@ -30,7 +30,9 @@ export const login = async (req, res) => {
     const token = jwt.sign(
       {
         id: user.id,
-        rol: user.rol
+        rol: user.rol,
+        local_id: user.local_id,
+        es_reemplazante: !!user.es_reemplazante
       },
       'softfusion',
       {
@@ -45,7 +47,8 @@ export const login = async (req, res) => {
       nombre: user.nombre,
       email: user.email,
       rol: user.rol,
-      local_id: user.local_id
+      local_id: user.local_id,
+      es_reemplazante: !!user.es_reemplazante
     });
   } catch (err) {
     console.error('Error en login:', err);
