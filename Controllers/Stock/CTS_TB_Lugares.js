@@ -14,17 +14,71 @@
 import MD_TB_Lugares from '../../Models/Stock/MD_TB_Lugares.js';
 const LugaresModel = MD_TB_Lugares.LugaresModel;
 import { StockModel } from '../../Models/Stock/MD_TB_Stock.js'; // Asegurate de tenerlo
+import { Op } from 'sequelize';
 
 // Obtener todos los lugares
 export const OBRS_Lugares_CTS = async (req, res) => {
   try {
-    const lugares = await LugaresModel.findAll();
-    res.json(lugares);
+    // NO seteamos defaults acá
+    const { page, limit, q, orderBy, orderDir } = req.query || {};
+
+    // ¿El cliente realmente mandó algún parámetro?
+    const hasParams =
+      Object.prototype.hasOwnProperty.call(req.query, 'page') ||
+      Object.prototype.hasOwnProperty.call(req.query, 'limit') ||
+      Object.prototype.hasOwnProperty.call(req.query, 'q') ||
+      Object.prototype.hasOwnProperty.call(req.query, 'orderBy') ||
+      Object.prototype.hasOwnProperty.call(req.query, 'orderDir');
+
+    // 🔁 Retrocompat: SIN params => array plano (como antes)
+    if (!hasParams) {
+      const lugares = await LugaresModel.findAll({ order: [['id', 'ASC']] });
+      return res.json(lugares);
+    }
+
+    // 🧭 Paginado con defaults recién acá
+    const pageNum = Math.max(parseInt(page || '1', 10), 1);
+    const limitNum = Math.min(Math.max(parseInt(limit || '20', 10), 1), 100);
+    const offset = (pageNum - 1) * limitNum;
+
+    const where = {};
+    if (q && q.trim() !== '') {
+      where.nombre = { [Op.like]: `%${q.trim()}%` };
+    }
+
+    const validColumns = ['id', 'nombre', 'created_at', 'updated_at'];
+    const col = validColumns.includes(orderBy || '') ? orderBy : 'id';
+    const dir = ['ASC', 'DESC'].includes(String(orderDir || '').toUpperCase())
+      ? String(orderDir).toUpperCase()
+      : 'ASC';
+
+    const { rows, count } = await LugaresModel.findAndCountAll({
+      where,
+      order: [[col, dir]],
+      limit: limitNum,
+      offset
+    });
+
+    const totalPages = Math.max(Math.ceil(count / limitNum), 1);
+
+    return res.json({
+      data: rows,
+      meta: {
+        total: count,
+        page: pageNum,
+        limit: limitNum,
+        totalPages,
+        hasNext: pageNum < totalPages,
+        hasPrev: pageNum > 1,
+        orderBy: col,
+        orderDir: dir,
+        q: q || ''
+      }
+    });
   } catch (error) {
     res.status(500).json({ mensajeError: error.message });
   }
 };
-
 // Obtener un solo lugar por ID
 export const OBR_Lugar_CTS = async (req, res) => {
   try {
