@@ -17,12 +17,114 @@ import { registrarLog } from '../../Helpers/registrarLog.js';
 import { ComboProductosPermitidosModel } from '../../Models/Combos/MD_TB_ComboProductosPermitidos.js';
 
 // Obtener todos los combos
+
 export const OBRS_Combos_CTS = async (req, res) => {
   try {
-    const combos = await CombosModel.findAll({
-      order: [['id', 'DESC']]
+    const {
+      page,
+      limit,
+      q,
+      estado, // 'activo' | 'inactivo'
+      orderBy, // id | nombre | precio_fijo | cantidad_items | created_at | updated_at | estado
+      orderDir, // ASC | DESC
+      minPrecio, // opcional
+      maxPrecio, // opcional
+      minItems, // opcional
+      maxItems // opcional
+    } = req.query || {};
+
+    // ¿Llegó algún parámetro? -> si NO, devolvemos array plano (retrocompat)
+    const hasParams =
+      Object.prototype.hasOwnProperty.call(req.query, 'page') ||
+      Object.prototype.hasOwnProperty.call(req.query, 'limit') ||
+      Object.prototype.hasOwnProperty.call(req.query, 'q') ||
+      Object.prototype.hasOwnProperty.call(req.query, 'estado') ||
+      Object.prototype.hasOwnProperty.call(req.query, 'orderBy') ||
+      Object.prototype.hasOwnProperty.call(req.query, 'orderDir') ||
+      Object.prototype.hasOwnProperty.call(req.query, 'minPrecio') ||
+      Object.prototype.hasOwnProperty.call(req.query, 'maxPrecio') ||
+      Object.prototype.hasOwnProperty.call(req.query, 'minItems') ||
+      Object.prototype.hasOwnProperty.call(req.query, 'maxItems');
+
+    if (!hasParams) {
+      // Comportamiento original
+      const combos = await CombosModel.findAll({
+        order: [['id', 'DESC']]
+      });
+      return res.json(combos);
+    }
+
+    // ✅ Paginado + filtros + orden
+    const pageNum = Math.max(parseInt(page || '1', 10), 1);
+    const limitNum = Math.min(Math.max(parseInt(limit || '20', 10), 1), 100);
+    const offset = (pageNum - 1) * limitNum;
+
+    // WHERE
+    const where = {};
+    if (q && q.trim() !== '') {
+      const like = { [Op.like]: `%${q.trim()}%` };
+      where[Op.or] = [{ nombre: like }, { descripcion: like }];
+    }
+    if (estado && ['activo', 'inactivo'].includes(estado)) {
+      where.estado = estado;
+    }
+    // Rango de precio (opcional)
+    if (minPrecio || maxPrecio) {
+      where.precio_fijo = {};
+      if (minPrecio) where.precio_fijo[Op.gte] = Number(minPrecio);
+      if (maxPrecio) where.precio_fijo[Op.lte] = Number(maxPrecio);
+    }
+    // Rango de items (opcional)
+    if (minItems || maxItems) {
+      where.cantidad_items = {};
+      if (minItems) where.cantidad_items[Op.gte] = Number(minItems);
+      if (maxItems) where.cantidad_items[Op.lte] = Number(maxItems);
+    }
+
+    const validColumns = [
+      'id',
+      'nombre',
+      'precio_fijo',
+      'cantidad_items',
+      'estado',
+      'created_at',
+      'updated_at'
+    ];
+    const col = validColumns.includes(orderBy || '') ? orderBy : 'id';
+    const dir = ['ASC', 'DESC'].includes(String(orderDir || '').toUpperCase())
+      ? String(orderDir).toUpperCase()
+      : 'DESC'; // por default conservamos el DESC original
+
+    const total = await CombosModel.count({ where });
+
+    const rows = await CombosModel.findAll({
+      where,
+      order: [[col, dir]],
+      limit: limitNum,
+      offset
     });
-    res.json(combos);
+
+    const totalPages = Math.max(Math.ceil(total / limitNum), 1);
+
+    return res.json({
+      data: rows,
+      meta: {
+        total,
+        page: pageNum,
+        limit: limitNum,
+        totalPages,
+        hasNext: pageNum < totalPages,
+        hasPrev: pageNum > 1,
+        orderBy: col,
+        orderDir: dir,
+        q: q || '',
+        estado: estado || '',
+        minPrecio: minPrecio || '',
+        maxPrecio: maxPrecio || '',
+        minItems: minItems || '',
+        maxItems: maxItems || ''
+      }
+    });
   } catch (error) {
     res.status(500).json({ mensajeError: error.message });
   }
