@@ -22,12 +22,84 @@
 import MD_TB_Locales from '../../Models/Stock/MD_TB_Locales.js';
 const LocalesModel = MD_TB_Locales.LocalesModel;
 import { registrarLog } from '../../Helpers/registrarLog.js';
+import { Op } from 'sequelize';
 
 // Obtener todos los locales
 export const OBRS_Locales_CTS = async (req, res) => {
   try {
-    const locales = await LocalesModel.findAll();
-    res.json(locales);
+    const { page, limit, q, orderBy, orderDir } = req.query || {};
+
+    // ⚠️ Retrocompat: SIN params => array plano (como antes)
+    const hasParams =
+      Object.prototype.hasOwnProperty.call(req.query, 'page') ||
+      Object.prototype.hasOwnProperty.call(req.query, 'limit') ||
+      Object.prototype.hasOwnProperty.call(req.query, 'q') ||
+      Object.prototype.hasOwnProperty.call(req.query, 'orderBy') ||
+      Object.prototype.hasOwnProperty.call(req.query, 'orderDir');
+
+    if (!hasParams) {
+      const locales = await LocalesModel.findAll({ order: [['id', 'ASC']] });
+      return res.json(locales);
+    }
+
+    // ✅ Paginado + filtros + orden
+    const pageNum = Math.max(parseInt(page || '1', 10), 1);
+    const limitNum = Math.min(Math.max(parseInt(limit || '20', 10), 1), 100);
+    const offset = (pageNum - 1) * limitNum;
+
+    const where = {};
+    if (q && q.trim() !== '') {
+      const like = { [Op.like]: `%${q.trim()}%` };
+      where[Op.or] = [
+        { nombre: like },
+        { codigo: like },
+        { ciudad: like },
+        { provincia: like },
+        { direccion: like },
+        { telefono: like },
+        { email: like },
+        { responsable_nombre: like },
+        { responsable_dni: like }
+      ];
+    }
+
+    const validColumns = [
+      'id',
+      'nombre',
+      'codigo',
+      'ciudad',
+      'provincia',
+      'created_at',
+      'updated_at'
+    ];
+    const col = validColumns.includes(orderBy || '') ? orderBy : 'id';
+    const dir = ['ASC', 'DESC'].includes(String(orderDir || '').toUpperCase())
+      ? String(orderDir).toUpperCase()
+      : 'ASC';
+
+    const { rows, count } = await LocalesModel.findAndCountAll({
+      where,
+      order: [[col, dir]],
+      limit: limitNum,
+      offset
+    });
+
+    const totalPages = Math.max(Math.ceil(count / limitNum), 1);
+
+    return res.json({
+      data: rows,
+      meta: {
+        total: count,
+        page: pageNum,
+        limit: limitNum,
+        totalPages,
+        hasNext: pageNum < totalPages,
+        hasPrev: pageNum > 1,
+        orderBy: col,
+        orderDir: dir,
+        q: q || ''
+      }
+    });
   } catch (error) {
     res.status(500).json({ mensajeError: error.message });
   }
