@@ -10,7 +10,7 @@
  *   • ER_Categoria_CTS   : bloquea/forza eliminación si hay productos
  */
 import db from '../../DataBase/db.js';
-import { fn, col, Transaction } from 'sequelize';
+import { Op, fn, col, Transaction, literal } from 'sequelize';
 
 import { CategoriasModel } from '../../Models/Stock/MD_TB_Categorias.js';
 import { ProductosModel } from '../../Models/Stock/MD_TB_Productos.js'; // ⬅️ tu modelo de productos
@@ -20,29 +20,115 @@ import { ComboProductosPermitidosModel } from '../../Models/Combos/MD_TB_ComboPr
  * 1) Obtener TODAS las categorías + cantidad de productos
  *    GET /categorias
  * =======================================================================*/
-export const OBRS_Categorias_CTS = async (_req, res) => {
+export const OBRS_Categorias_CTS = async (req, res) => {
   try {
-    const categorias = await CategoriasModel.findAll({
-      include: [
-        {
-          model: ProductosModel,
-          as: 'productos',
-          attributes: [] // no necesitamos columnas de producto
-        }
-      ],
+    const { page, limit, q, estado, orderBy, orderDir } = req.query || {};
+
+    // Detectar si realmente mandaron parámetros (retrocompat ON cuando no)
+    const hasParams =
+      Object.prototype.hasOwnProperty.call(req.query, 'page') ||
+      Object.prototype.hasOwnProperty.call(req.query, 'limit') ||
+      Object.prototype.hasOwnProperty.call(req.query, 'q') ||
+      Object.prototype.hasOwnProperty.call(req.query, 'estado') ||
+      Object.prototype.hasOwnProperty.call(req.query, 'orderBy') ||
+      Object.prototype.hasOwnProperty.call(req.query, 'orderDir');
+
+    // Tablas y FK (ajustá si tu FK es distinta)
+    const catTable = CategoriasModel.getTableName(); // normalmente 'categorias'
+    const prodTable = ProductosModel.getTableName(); // normalmente 'productos'
+    const fk = 'categoria_id'; // ajustá si tu FK se llama distinto
+
+    // Subquery correlacionado para contar productos por categoría
+    const countLiteral = literal(`(
+      SELECT COUNT(*)
+      FROM \`${prodTable}\` AS p
+      WHERE p.\`${fk}\` = \`${catTable}\`.id
+    )`);
+
+    // WHERE de filtros
+    const where = {};
+    if (q && q.trim() !== '') {
+      const like = { [Op.like]: `%${q.trim()}%` };
+      where[Op.or] = [{ nombre: like }, { descripcion: like }];
+    }
+    if (estado && ['activo', 'inactivo'].includes(estado)) {
+      where.estado = estado;
+    }
+
+    // Orden
+    const validColumns = [
+      'id',
+      'nombre',
+      'descripcion',
+      'estado',
+      'created_at',
+      'updated_at',
+      'cantidadProductos'
+    ];
+    const colName = validColumns.includes(orderBy || '') ? orderBy : 'id';
+    const dirName = ['ASC', 'DESC'].includes(
+      String(orderDir || '').toUpperCase()
+    )
+      ? String(orderDir).toUpperCase()
+      : 'ASC';
+
+    // 🔁 SIN params -> array plano (retrocompat)
+    if (!hasParams) {
+      const filas = await CategoriasModel.findAll({
+        where,
+        attributes: {
+          include: [[countLiteral, 'cantidadProductos']]
+        },
+        order:
+          colName === 'cantidadProductos'
+            ? [[countLiteral, dirName]]
+            : [[colName, dirName]]
+      });
+      return res.json(filas);
+    }
+
+    // ✅ CON params -> paginado
+    const pageNum = Math.max(parseInt(page || '1', 10), 1);
+    const limitNum = Math.min(Math.max(parseInt(limit || '20', 10), 1), 100);
+    const offset = (pageNum - 1) * limitNum;
+
+    const total = await CategoriasModel.count({ where });
+
+    const rows = await CategoriasModel.findAll({
+      where,
       attributes: {
-        include: [[fn('COUNT', col('productos.id')), 'cantidadProductos']]
+        include: [[countLiteral, 'cantidadProductos']]
       },
-      group: ['categorias.id']
+      order:
+        colName === 'cantidadProductos'
+          ? [[countLiteral, dirName]]
+          : [[colName, dirName]],
+      limit: limitNum,
+      offset
     });
 
-    res.json(categorias);
+    const totalPages = Math.max(Math.ceil(total / limitNum), 1);
+
+    return res.json({
+      data: rows,
+      meta: {
+        total,
+        page: pageNum,
+        limit: limitNum,
+        totalPages,
+        hasNext: pageNum < totalPages,
+        hasPrev: pageNum > 1,
+        orderBy: colName,
+        orderDir: dirName,
+        q: q || '',
+        estado: estado || ''
+      }
+    });
   } catch (error) {
     console.error('OBRS_Categorias_CTS:', error);
     res.status(500).json({ mensajeError: error.message });
   }
 };
-
 /* =========================================================================
  * 2) Obtener UNA categoría por ID + cantidad de productos
  *    GET /categorias/:id
@@ -169,7 +255,8 @@ export const UR_Categoria_CTS = async (req, res) => {
 export const ER_Categoria_CTS = async (req, res) => {
   const id = Number(req.params.id);
   const body = req.body || {};
-  const usuario_log_id = body.usuario_log_id ?? req.query.usuario_log_id ?? null;
+  const usuario_log_id =
+    body.usuario_log_id ?? req.query.usuario_log_id ?? null;
 
   // Aceptar forzado desde body o query
   const rawForzado = body.forzado ?? body.forzar ?? req.query.forzar ?? 'false';
@@ -243,7 +330,8 @@ export const ER_Categoria_CTS = async (req, res) => {
     try {
       if (usuario_log_id) {
         const partes = [];
-        if (countProd > 0) partes.push(`${countProd} producto(s) desvinculados`);
+        if (countProd > 0)
+          partes.push(`${countProd} producto(s) desvinculados`);
         if (countCPP > 0) partes.push(`removida de ${countCPP} combo(s)`);
         const sufijo = partes.length ? ` (${partes.join(', ')})` : '';
         await registrarLog(
@@ -269,4 +357,3 @@ export const ER_Categoria_CTS = async (req, res) => {
     return res.status(500).json({ mensajeError: error.message });
   }
 };
-
