@@ -17,7 +17,7 @@ import { CategoriasModel } from '../../Models/Stock/MD_TB_Categorias.js';
 import { StockModel } from '../../Models/Stock/MD_TB_Stock.js';
 import db from '../../DataBase/db.js';
 import axios from 'axios';
-import { Op } from 'sequelize';
+import { Op, literal } from 'sequelize';
 import { ComboProductosPermitidosModel } from '../../Models/Combos/MD_TB_ComboProductosPermitidos.js';
 import { registrarLog } from '../../Helpers/registrarLog.js';
 import { PedidoStockModel } from '../../Models/Stock/MD_TB_PedidoStock.js';
@@ -31,14 +31,165 @@ const getProvDisplayName = (prov) =>
 // Obtener todos los productos con categoría incluida
 export const OBRS_Productos_CTS = async (req, res) => {
   try {
-    const productos = await ProductosModel.findAll({
+    const {
+      page,
+      limit,
+      q,
+      categoriaId,
+      estado,
+      proveedorId,
+      orderBy,
+      orderDir
+    } = req.query || {};
+
+    // Detectar si el cliente realmente mandó parámetros (para retrocompat)
+    const hasParams =
+      Object.prototype.hasOwnProperty.call(req.query, 'page') ||
+      Object.prototype.hasOwnProperty.call(req.query, 'limit') ||
+      Object.prototype.hasOwnProperty.call(req.query, 'q') ||
+      Object.prototype.hasOwnProperty.call(req.query, 'categoriaId') ||
+      Object.prototype.hasOwnProperty.call(req.query, 'estado') ||
+      Object.prototype.hasOwnProperty.call(req.query, 'proveedorId') ||
+      Object.prototype.hasOwnProperty.call(req.query, 'orderBy') ||
+      Object.prototype.hasOwnProperty.call(req.query, 'orderDir');
+
+    // 🔁 SIN params -> comportamiento EXACTO actual (array plano con include categoría)
+    if (!hasParams) {
+      const productos = await ProductosModel.findAll({
+        include: {
+          model: CategoriasModel,
+          as: 'categoria',
+          attributes: ['id', 'nombre']
+        },
+        order: [['id', 'ASC']]
+      });
+      return res.json(productos);
+    }
+
+    // 🧭 CON params -> paginado + filtros + orden
+    const pageNum = Math.max(parseInt(page || '1', 10), 1);
+    const limitNum = Math.min(Math.max(parseInt(limit || '20', 10), 1), 100);
+    const offset = (pageNum - 1) * limitNum;
+
+    // WHERE: ajustá los campos a tu esquema (estos son comunes)
+    const where = {};
+
+    if (q && q.trim() !== '') {
+      const like = { [Op.like]: `%${q.trim()}%` };
+      // Sumá/quitá claves según tus columnas reales
+      where[Op.or] = [
+        { nombre: like },
+        { codigo: like },
+        { descripcion: like },
+        { barcode: like } // si existe
+      ];
+    }
+
+    if (categoriaId && Number(categoriaId) > 0) {
+      where.categoria_id = Number(categoriaId); // ajustá a tu FK real
+    }
+
+    if (estado && typeof estado === 'string') {
+      // si usás estado 'activo'/'inactivo' o similar
+      where.estado = estado;
+    }
+
+    // Filtro por proveedor usando EXISTS sobre la tabla pivote
+    if (proveedorId && Number(proveedorId) > 0) {
+      const ppTable = ProductoProveedorModel.getTableName(); // ej: 'producto_proveedor'
+      const prodTable = ProductosModel.getTableName(); // ej: 'productos'
+      const provId = Number(proveedorId);
+      where[Op.and] = [
+        literal(`EXISTS (
+          SELECT 1
+          FROM \`${ppTable}\` pp
+          WHERE pp.\`producto_id\` = \`${prodTable}\`.\`id\`
+            AND pp.\`proveedor_id\` = ${provId}
+        )`)
+      ];
+    }
+
+    // Orden permitido (evitamos SQL injection)
+    const validColumns = [
+      'id',
+      'nombre',
+      'codigo',
+      'created_at',
+      'updated_at'
+      // Podés agregar 'precio' si existe y querés permitir orden por precio
+    ];
+    const col = validColumns.includes(orderBy || '') ? orderBy : 'id';
+    const dir = ['ASC', 'DESC'].includes(String(orderDir || '').toUpperCase())
+      ? String(orderDir).toUpperCase()
+      : 'ASC';
+
+    // 1) Conteo (sin include)
+    const total = await ProductosModel.count({ where });
+
+    // Si no hay filas, devolvemos vació rápido
+    if (total === 0) {
+      return res.json({
+        data: [],
+        meta: {
+          total: 0,
+          page: pageNum,
+          limit: limitNum,
+          totalPages: 1,
+          hasNext: false,
+          hasPrev: false,
+          orderBy: col,
+          orderDir: dir,
+          q: q || '',
+          categoriaId: categoriaId || '',
+          estado: estado || '',
+          proveedorId: proveedorId || ''
+        }
+      });
+    }
+
+    // 2) Buscar IDs en el orden requerido (sin include para evitar subquery pesado)
+    const idRows = await ProductosModel.findAll({
+      where,
+      attributes: ['id'],
+      order: [[col, dir]],
+      limit: limitNum,
+      offset,
+      raw: true
+    });
+    const ids = idRows.map((r) => r.id);
+
+    // 3) Traer las filas completas con include de categoría, y reordenarlas según "ids"
+    let rows = await ProductosModel.findAll({
+      where: { id: ids },
       include: {
         model: CategoriasModel,
         as: 'categoria',
         attributes: ['id', 'nombre']
       }
     });
-    res.json(productos);
+
+    // Reordenar en memoria según "ids"
+    const index = new Map(ids.map((id, i) => [id, i]));
+    rows.sort((a, b) => index.get(a.id) - index.get(b.id));
+
+    const totalPages = Math.max(Math.ceil(total / limitNum), 1);
+    return res.json({
+      data: rows,
+      meta: {
+        total,
+        page: pageNum,
+        limit: limitNum,
+        totalPages,
+        hasNext: pageNum < totalPages,
+        hasPrev: pageNum > 1,
+        orderBy: col,
+        orderDir: dir,
+        q: q || '',
+        categoriaId: categoriaId || '',
+        estado: estado || '',
+        proveedorId: proveedorId || ''
+      }
+    });
   } catch (error) {
     res.status(500).json({ mensajeError: error.message });
   }
