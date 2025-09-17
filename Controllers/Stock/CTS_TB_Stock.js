@@ -21,7 +21,7 @@ import { EstadosModel } from '../../Models/Stock/MD_TB_Estados.js';
 import { DetalleVentaModel } from '../../Models/Ventas/MD_TB_DetalleVenta.js';
 import db from '../../DataBase/db.js'; // Esta es tu instancia Sequelize
 import { registrarLog } from '../../Helpers/registrarLog.js';
-import { Transaction, Op, Sequelize } from 'sequelize';
+import { Transaction, Op, literal, Sequelize } from 'sequelize';
 
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -105,7 +105,192 @@ const ensureUniqueProductSku = async (
 // Obtener todos los registros de stock con sus relaciones
 export const OBRS_Stock_CTS = async (req, res) => {
   try {
-    const stock = await StockModel.findAll({
+    const {
+      page,
+      limit,
+      q, // busca por producto (nombre / codigo / descripcion)
+      productoId,
+      localId,
+      lugarId,
+      estadoId,
+      orderBy, // id | created_at | updated_at | producto_nombre
+      orderDir // ASC | DESC
+    } = req.query || {};
+
+    // ¿Llegó algún parámetro? -> si NO, devolvemos array plano (retrocompat)
+    const hasParams =
+      Object.prototype.hasOwnProperty.call(req.query, 'page') ||
+      Object.prototype.hasOwnProperty.call(req.query, 'limit') ||
+      Object.prototype.hasOwnProperty.call(req.query, 'q') ||
+      Object.prototype.hasOwnProperty.call(req.query, 'productoId') ||
+      Object.prototype.hasOwnProperty.call(req.query, 'localId') ||
+      Object.prototype.hasOwnProperty.call(req.query, 'lugarId') ||
+      Object.prototype.hasOwnProperty.call(req.query, 'estadoId') ||
+      Object.prototype.hasOwnProperty.call(req.query, 'orderBy') ||
+      Object.prototype.hasOwnProperty.call(req.query, 'orderDir');
+
+    if (!hasParams) {
+      // 🔁 Comportamiento original (NO romper StockGet / fetchAll)
+      const stock = await StockModel.findAll({
+        include: [
+          { model: ProductosModel },
+          { model: LocalesModel },
+          { model: LugaresModel },
+          { model: EstadosModel }
+        ],
+        order: [['id', 'ASC']]
+      });
+      return res.json(stock);
+    }
+
+    // ✅ Paginado + filtros + orden
+    const pageNum = Math.max(parseInt(page || '1', 10), 1);
+    const limitNum = Math.min(Math.max(parseInt(limit || '20', 10), 1), 100);
+    const offset = (pageNum - 1) * limitNum;
+
+    // Tablas (para literales seguros)
+    const stockTable = StockModel.getTableName(); // ej 'stock'
+    const prodTable = ProductosModel.getTableName(); // ej 'productos'
+
+    // WHERE base sobre stock.*
+    const where = {};
+    if (productoId && Number(productoId) > 0)
+      where.producto_id = Number(productoId);
+    if (localId && Number(localId) > 0) where.local_id = Number(localId);
+    if (lugarId && Number(lugarId) > 0) where.lugar_id = Number(lugarId);
+    if (estadoId && Number(estadoId) > 0) where.estado_id = Number(estadoId);
+
+    // ---- BÚSQUEDA POR PRODUCTO (nombre / codigo_sku / descripcion) ----
+    // Hacemos un "prequery" a productos y filtramos stock con IN(ids)
+    if (q && q.trim() !== '') {
+      const term = q.trim();
+
+      // 1) Buscar IDs de productos que matchean
+      const prodWhere = {
+        [Op.or]: [
+          { nombre: { [Op.like]: `%${term}%` } },
+          { codigo_sku: { [Op.like]: `%${term}%` } },
+          { descripcion: { [Op.like]: `%${term}%` } } // si querés, podés quitar esta línea
+        ]
+      };
+
+      const prodIdsRows = await ProductosModel.findAll({
+        where: prodWhere,
+        attributes: ['id'],
+        raw: true
+        // opcional: poné un límite alto para evitar arrays gigantes
+        // limit: 5000
+      });
+
+      const prodIds = prodIdsRows.map((r) => r.id);
+
+      // Si no hay productos que coincidan -> respondemos vacío rápido
+      if (prodIds.length === 0) {
+        return res.json({
+          data: [],
+          meta: {
+            total: 0,
+            page: Math.max(parseInt(page || '1', 10), 1),
+            limit: Math.min(Math.max(parseInt(limit || '20', 10), 1), 100),
+            totalPages: 1,
+            hasNext: false,
+            hasPrev: false,
+            orderBy: orderBy || 'id',
+            orderDir: (orderDir || 'ASC').toUpperCase(),
+            q: term,
+            productoId: productoId || '',
+            localId: localId || '',
+            lugarId: lugarId || '',
+            estadoId: estadoId || ''
+          }
+        });
+      }
+
+      // 2) Combinar con productoId si viniera (intersección)
+      if (productoId && Number(productoId) > 0) {
+        if (!prodIds.includes(Number(productoId))) {
+          // No hay intersección -> vacío
+          return res.json({
+            data: [],
+            meta: {
+              total: 0,
+              page: Math.max(parseInt(page || '1', 10), 1),
+              limit: Math.min(Math.max(parseInt(limit || '20', 10), 1), 100),
+              totalPages: 1,
+              hasNext: false,
+              hasPrev: false,
+              orderBy: orderBy || 'id',
+              orderDir: (orderDir || 'ASC').toUpperCase(),
+              q: term,
+              productoId: productoId || '',
+              localId: localId || '',
+              lugarId: lugarId || '',
+              estadoId: estadoId || ''
+            }
+          });
+        }
+        // ya tenés productoId, no hace falta IN
+        // (dejamos where.producto_id como estaba si ya lo setearon antes)
+      } else {
+        // si NO vino productoId, filtramos por IN
+        where.producto_id = { [Op.in]: prodIds };
+      }
+    }
+
+    // Orden permitido
+    const validColumns = ['id', 'created_at', 'updated_at', 'producto_nombre'];
+    const col = validColumns.includes(orderBy || '') ? orderBy : 'id';
+    const dir = ['ASC', 'DESC'].includes(String(orderDir || '').toUpperCase())
+      ? String(orderDir).toUpperCase()
+      : 'ASC';
+
+    // Para ordenar por nombre de producto usamos un subquery correlacionado
+    const productoNombreLiteral = literal(`(
+      SELECT p.\`nombre\` FROM \`${prodTable}\` p
+      WHERE p.\`id\` = \`${stockTable}\`.\`producto_id\`
+    )`);
+
+    // 1) Conteo total (sin include, acepta literals)
+    const total = await StockModel.count({ where });
+
+    if (total === 0) {
+      return res.json({
+        data: [],
+        meta: {
+          total: 0,
+          page: pageNum,
+          limit: limitNum,
+          totalPages: 1,
+          hasNext: false,
+          hasPrev: false,
+          orderBy: col,
+          orderDir: dir,
+          q: q || '',
+          productoId: productoId || '',
+          localId: localId || '',
+          lugarId: lugarId || '',
+          estadoId: estadoId || ''
+        }
+      });
+    }
+
+    // 2) Buscar IDs en orden (sin include)
+    const idRows = await StockModel.findAll({
+      where,
+      attributes: ['id'],
+      order:
+        col === 'producto_nombre'
+          ? [[productoNombreLiteral, dir]]
+          : [[col, dir]],
+      limit: limitNum,
+      offset,
+      raw: true
+    });
+    const ids = idRows.map((r) => r.id);
+
+    // 3) Traer filas completas con includes y reordenar
+    let rows = await StockModel.findAll({
+      where: { id: ids },
       include: [
         { model: ProductosModel },
         { model: LocalesModel },
@@ -113,7 +298,29 @@ export const OBRS_Stock_CTS = async (req, res) => {
         { model: EstadosModel }
       ]
     });
-    res.json(stock);
+
+    const orderMap = new Map(ids.map((id, i) => [id, i]));
+    rows.sort((a, b) => orderMap.get(a.id) - orderMap.get(b.id));
+
+    const totalPages = Math.max(Math.ceil(total / limitNum), 1);
+    return res.json({
+      data: rows,
+      meta: {
+        total,
+        page: pageNum,
+        limit: limitNum,
+        totalPages,
+        hasNext: pageNum < totalPages,
+        hasPrev: pageNum > 1,
+        orderBy: col,
+        orderDir: dir,
+        q: q || '',
+        productoId: productoId || '',
+        localId: localId || '',
+        lugarId: lugarId || '',
+        estadoId: estadoId || ''
+      }
+    });
   } catch (error) {
     res.status(500).json({ mensajeError: error.message });
   }
@@ -433,7 +640,8 @@ export const UR_Stock_CTS = async (req, res) => {
   if (isNaN(cantidadNum)) {
     return res.status(400).json({ mensajeError: 'Cantidad inválida' });
   }
-  const enExhibicionBool = en_exhibicion === undefined ? undefined : toBool(en_exhibicion);
+  const enExhibicionBool =
+    en_exhibicion === undefined ? undefined : toBool(en_exhibicion);
 
   try {
     const producto = await ProductosModel.findByPk(producto_id);
@@ -460,7 +668,9 @@ export const UR_Stock_CTS = async (req, res) => {
       const nuevoStock = await existente.update({
         cantidad: existente.cantidad + cantidadNum,
         en_exhibicion:
-          enExhibicionBool === undefined ? existente.en_exhibicion : enExhibicionBool
+          enExhibicionBool === undefined
+            ? existente.en_exhibicion
+            : enExhibicionBool
       });
 
       await StockModel.destroy({ where: { id } });
@@ -489,7 +699,10 @@ export const UR_Stock_CTS = async (req, res) => {
       lugar_id,
       estado_id,
       cantidad: cantidadNum,
-      en_exhibicion: enExhibicionBool === undefined ? stockActual.en_exhibicion : enExhibicionBool,
+      en_exhibicion:
+        enExhibicionBool === undefined
+          ? stockActual.en_exhibicion
+          : enExhibicionBool,
       observaciones,
       codigo_sku
     };
@@ -512,20 +725,28 @@ export const UR_Stock_CTS = async (req, res) => {
       const prev = stockActual[campo];
       const next =
         campo === 'en_exhibicion'
-          ? (enExhibicionBool === undefined ? prev : enExhibicionBool)
+          ? enExhibicionBool === undefined
+            ? prev
+            : enExhibicionBool
           : nuevos[campo];
 
       // Igualdad estricta para boolean/number/string
       const distintos =
-        (campo === 'en_exhibicion' ? Boolean(prev) !== Boolean(next) : `${prev}` !== `${next}`);
+        campo === 'en_exhibicion'
+          ? Boolean(prev) !== Boolean(next)
+          : `${prev}` !== `${next}`;
 
       if (distintos) {
         if (campo === 'en_exhibicion') {
           cambios.push(
-            `cambió el campo "en_exhibicion" de "${prettyBool(Boolean(prev))}" a "${prettyBool(Boolean(next))}"`
+            `cambió el campo "en_exhibicion" de "${prettyBool(
+              Boolean(prev)
+            )}" a "${prettyBool(Boolean(next))}"`
           );
         } else {
-          cambios.push(`cambió el campo "${campo}" de "${prev ?? ''}" a "${next ?? ''}"`);
+          cambios.push(
+            `cambió el campo "${campo}" de "${prev ?? ''}" a "${next ?? ''}"`
+          );
         }
       }
     }
@@ -551,7 +772,9 @@ export const UR_Stock_CTS = async (req, res) => {
       if (usuario_log_id) {
         const descripcion =
           cambios.length > 0
-            ? `actualizó el stock del producto "${producto?.nombre}" y ${cambios.join(', ')}`
+            ? `actualizó el stock del producto "${
+                producto?.nombre
+              }" y ${cambios.join(', ')}`
             : `actualizó el stock del producto "${producto?.nombre}" sin cambios relevantes`;
 
         await registrarLog(req, 'stock', 'editar', descripcion, usuario_log_id);
@@ -566,7 +789,6 @@ export const UR_Stock_CTS = async (req, res) => {
     res.status(500).json({ mensajeError: error.message });
   }
 };
-
 
 export const ER_StockPorProducto = async (req, res) => {
   try {
