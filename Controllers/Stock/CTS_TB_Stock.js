@@ -102,6 +102,40 @@ const ensureUniqueProductSku = async (
   }
 };
 
+const codeFrom = (str = '', len = 3) =>
+  String(str)
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '') // sin acentos
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, '') // solo A-Z0-9
+    .slice(0, len) || 'X';
+
+const buildSkuCandidate = (base, localRow, lugarRow, estadoRow) => {
+  const locCode =
+    (localRow?.codigo && localRow.codigo.trim()) ||
+    codeFrom(localRow?.nombre, 3);
+  const lugarCode = codeFrom(lugarRow?.nombre, 3);
+  const estadoCode = codeFrom(estadoRow?.nombre, 3);
+  const head = (base || '').slice(0, 180); // margen para sufijos
+  return `${head}-${locCode}-${lugarCode}-${estadoCode}`;
+};
+
+// Unicidad GLOBAL por codigo_sku
+const ensureUniqueSkuGlobal = async (candidate, t) => {
+  let cand = candidate.slice(0, 250);
+  let i = 1;
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const exists = await StockModel.findOne({
+      where: { codigo_sku: cand },
+      transaction: t
+    });
+    if (!exists) return cand;
+    i += 1;
+    const suffix = `-${i}`;
+    cand = `${candidate.slice(0, 250 - suffix.length)}${suffix}`;
+  }
+};
 // Obtener todos los registros de stock con sus relaciones
 export const OBRS_Stock_CTS = async (req, res) => {
   try {
@@ -345,38 +379,88 @@ export const OBR_Stock_CTS = async (req, res) => {
     res.status(500).json({ mensajeError: error.message });
   }
 };
+// ✅ Cambios clave:
+// - Nuevo parámetro: localesCant = [{ local_id, cantidad }]
+// - Si viene localesCant, se usa cantidad por local.
+// - Si NO viene, se usa el legacy: locales[] o local_id + cantidad única.
+// - Reuso de toda tu lógica (transacciones cortas, retries, ensureUniqueSku, logs).
 export const CR_Stock_CTS = async (req, res) => {
   try {
     let {
       producto_id,
-      local_id, // single
-      locales, // bulk (array o "1,3,6")
-      lugar_id,
-      estado_id,
-      cantidad = 0,
+      local_id, // legacy single
+      locales, // legacy bulk (array o "1,3,6")
+      lugar_id, // global (fallback)
+      estado_id, // global (fallback)
+      cantidad = 0, // legacy: misma para todos
       en_perchero,
       en_exhibicion,
       codigo_sku,
       usuario_log_id,
-      reemplazar = false // true: setea cantidad; false: suma
+      reemplazar = false, // true: setea; false: suma
+      // NUEVO: por item
+      localesCant // [{ local_id, cantidad, lugar_id?, estado_id? }]
     } = req.body || {};
 
-    // Normalizar locales
+    // --- parse localesCant -> map por local ---
+    const mapItem = new Map(); // local_id -> { cantidad, lugar_id?, estado_id? }
+    if (Array.isArray(localesCant) && localesCant.length > 0) {
+      for (const it of localesCant) {
+        const lid = Number(it?.local_id);
+        if (!lid) continue;
+        mapItem.set(lid, {
+          cantidad: Math.max(0, Number(it?.cantidad) || 0),
+          lugar_id: it?.lugar_id != null ? Number(it.lugar_id) : null,
+          estado_id: it?.estado_id != null ? Number(it.estado_id) : null
+        });
+      }
+    }
+
+    // legacy: locales ids
     if (typeof locales === 'string') {
       locales = locales.split(',').map(Number).filter(Boolean);
     } else if (Array.isArray(locales)) {
       locales = [...new Set(locales.map(Number).filter(Boolean))];
     }
-    const localesTarget =
-      Array.isArray(locales) && locales.length
-        ? locales
-        : [Number(local_id)].filter(Boolean);
 
-    // Validación base
-    if (!producto_id || !lugar_id || !estado_id || localesTarget.length === 0) {
+    // targets
+    let localesTarget = [];
+    if (mapItem.size > 0) {
+      localesTarget = [...mapItem.keys()];
+    } else {
+      localesTarget =
+        Array.isArray(locales) && locales.length
+          ? locales
+          : [Number(local_id)].filter(Boolean);
+    }
+
+    // validaciones base
+    if (!producto_id || localesTarget.length === 0) {
       return res
         .status(400)
-        .json({ mensajeError: 'Faltan campos obligatorios.' });
+        .json({
+          mensajeError: 'Faltan campos obligatorios (producto o locales).'
+        });
+    }
+
+    // validar lugar/estado (por item o global)
+    if (mapItem.size > 0) {
+      for (const lid of localesTarget) {
+        const it = mapItem.get(lid) || {};
+        const li = it.lugar_id != null ? it.lugar_id : Number(lugar_id);
+        const ei = it.estado_id != null ? it.estado_id : Number(estado_id);
+        if (!li || !ei) {
+          return res
+            .status(400)
+            .json({ mensajeError: `Falta lugar/estado para el local ${lid}.` });
+        }
+      }
+    } else {
+      if (!lugar_id || !estado_id) {
+        return res
+          .status(400)
+          .json({ mensajeError: 'Faltan lugar_id y/o estado_id.' });
+      }
     }
 
     const showFlag =
@@ -386,44 +470,62 @@ export const CR_Stock_CTS = async (req, res) => {
         ? en_perchero
         : true;
 
-    // Datos de contexto (fuera de tx por seguridad y porque no cambian aquí)
-    const [producto, lugar, estado] = await Promise.all([
-      ProductosModel.findByPk(producto_id),
-      LugaresModel.findByPk(lugar_id),
-      EstadosModel.findByPk(estado_id)
-    ]);
-
-    const baseSku =
+    // contexto
+    const producto = await ProductosModel.findByPk(producto_id);
+    const baseSkuGlobal =
       (codigo_sku || '').trim() ||
       (producto?.codigo_sku || '').trim() ||
       `SKU-${producto_id}`;
 
-    // SKU único por (codigo_sku, local_id) SOLO para inserciones
-    const ensureUniqueSku = async (base, locId, t) => {
-      const base150 = (base || `SKU-${producto_id}`).slice(0, 150);
-      let candidate = base150;
-      let i = 1;
-      // eslint-disable-next-line no-constant-condition
-      while (true) {
-        const exists = await StockModel.findOne({
-          where: { codigo_sku: candidate, local_id: locId },
-          transaction: t
-        });
-        if (!exists) return candidate;
-        i += 1;
-        const suffix = `-${i}`;
-        candidate = `${base150.slice(0, 150 - suffix.length)}${suffix}`;
-      }
-    };
+    // ===== Prefetch para SKU y logs =====
+    const localesRows = await LocalesModel.findAll({
+      where: { id: { [Op.in]: localesTarget } },
+      attributes: ['id', 'nombre', 'codigo']
+    });
+
+    // set de lugares/estados usados realmente
+    const lugarIdsSet = new Set();
+    const estadoIdsSet = new Set();
+    for (const lid of localesTarget) {
+      const it = mapItem.get(lid) || {};
+      lugarIdsSet.add(
+        it.lugar_id != null ? Number(it.lugar_id) : Number(lugar_id)
+      );
+      estadoIdsSet.add(
+        it.estado_id != null ? Number(it.estado_id) : Number(estado_id)
+      );
+    }
+
+    const lugaresRows = await LugaresModel.findAll({
+      where: { id: { [Op.in]: [...lugarIdsSet].filter(Boolean) } },
+      attributes: ['id', 'nombre']
+    });
+    const estadosRows = await EstadosModel.findAll({
+      where: { id: { [Op.in]: [...estadoIdsSet].filter(Boolean) } },
+      attributes: ['id', 'nombre']
+    });
+
+    const byLocal = new Map(localesRows.map((r) => [Number(r.id), r]));
+    const byLugar = new Map(lugaresRows.map((r) => [Number(r.id), r]));
+    const byEstado = new Map(estadosRows.map((r) => [Number(r.id), r]));
 
     const creados = [];
     const actualizados = [];
 
-    // Procesar CADA local en su propia transacción corta + retry
-    for (const locId of localesTarget) {
-      let attempts = 0;
+    // ===== loop por local =====
+    for (const locIdRaw of localesTarget) {
+      const locId = Number(locIdRaw);
 
-      // reintento para deadlocks o carreras de inserción
+      const it = mapItem.get(locId) || {};
+      const lugarForItem = it.lugar_id != null ? it.lugar_id : Number(lugar_id);
+      const estadoForItem =
+        it.estado_id != null ? it.estado_id : Number(estado_id);
+      const cantLocal =
+        it.cantidad != null
+          ? Math.max(0, Number(it.cantidad) || 0)
+          : Math.max(0, Number(cantidad) || 0);
+
+      let attempts = 0;
       while (attempts < 3) {
         attempts += 1;
         const t = await db.transaction({
@@ -433,45 +535,53 @@ export const CR_Stock_CTS = async (req, res) => {
         try {
           const whereCombo = {
             producto_id: Number(producto_id),
-            local_id: Number(locId),
-            lugar_id: Number(lugar_id),
-            estado_id: Number(estado_id)
+            local_id: locId,
+            lugar_id: lugarForItem,
+            estado_id: estadoForItem
           };
 
-          // 1) Buscar sin lock
           const existente = await StockModel.findOne({
             where: whereCombo,
             transaction: t
           });
 
           if (existente) {
-            // 2) UPDATE
             const nuevaCantidad = reemplazar
-              ? Number(cantidad) || 0
-              : Number(existente.cantidad || 0) + (Number(cantidad) || 0);
+              ? cantLocal
+              : Number(existente.cantidad || 0) + cantLocal;
 
             await existente.update(
-              {
-                cantidad: nuevaCantidad,
-                en_exhibicion: !!showFlag
-                // NO tocar codigo_sku si ya existe
-              },
+              { cantidad: nuevaCantidad, en_exhibicion: !!showFlag },
               { transaction: t }
             );
 
             await t.commit();
-            actualizados.push(existente);
-            break; // ok para este local
+            actualizados.push({
+              ...existente.get(),
+              cantidad: nuevaCantidad,
+              local_id: locId
+            });
+            break;
           }
 
-          // 3) INSERT si no existe (optimista)
-          const finalSku = await ensureUniqueSku(baseSku, Number(locId), t);
+          // INSERT → construir SKU único por local/lugar/estado
+          const localRow = byLocal.get(locId);
+          const lugarRow = byLugar.get(lugarForItem);
+          const estadoRow = byEstado.get(estadoForItem);
+
+          const candidate = buildSkuCandidate(
+            baseSkuGlobal,
+            localRow,
+            lugarRow,
+            estadoRow
+          );
+          const finalSku = await ensureUniqueSkuGlobal(candidate, t); // unicidad GLOBAL
 
           try {
             const nuevo = await StockModel.create(
               {
                 ...whereCombo,
-                cantidad: Number(cantidad) || 0,
+                cantidad: cantLocal,
                 en_exhibicion: !!showFlag,
                 codigo_sku: finalSku
               },
@@ -479,12 +589,10 @@ export const CR_Stock_CTS = async (req, res) => {
             );
             await t.commit();
             creados.push(nuevo);
-            break; // ok para este local
+            break;
           } catch (err) {
-            // Si otro proceso insertó en la ventana → ER_DUP_ENTRY: resolvemos como UPDATE
             if (err?.original?.code === 'ER_DUP_ENTRY') {
               await t.rollback();
-              // pequeño backoff y reintentar (la próxima iteración encontrará "existente")
               await delay(30 + Math.floor(Math.random() * 70));
               continue;
             }
@@ -494,30 +602,26 @@ export const CR_Stock_CTS = async (req, res) => {
           try {
             await t.rollback();
           } catch {}
-          // Deadlock: reintentar con backoff
           if (err?.original?.code === 'ER_LOCK_DEADLOCK' && attempts < 3) {
             await delay(50 + Math.floor(Math.random() * 100));
             continue;
           }
-          // Otros errores: abortar
           throw err;
         }
       }
     }
 
-    // Log FUERA de tx (no debe romper la operación principal)
+    // ===== Log =====
     try {
-      const filasLocales = await LocalesModel.findAll({
-        where: { id: { [Op.in]: localesTarget } },
-        attributes: ['id', 'nombre']
-      });
-      const listaLocales = filasLocales.map((l) => `"${l.nombre}"`).join(', ');
+      const listaLocales = localesRows.map((l) => `"${l.nombre}"`).join(', ');
       const modo = reemplazar
         ? 'reemplazó'
         : creados.length
         ? 'creó'
         : 'ajustó';
-      const descripcion = `${modo} stock de "${producto?.nombre}" en ${listaLocales} (lugar: "${lugar?.nombre}", estado: "${estado?.nombre}")`;
+      const detalleLE =
+        mapItem.size > 0 ? ' (lugares/estados: variables por local)' : '';
+      const descripcion = `${modo} stock de "${producto?.nombre}" en ${listaLocales}${detalleLE}`;
 
       await registrarLog(
         req,
@@ -548,6 +652,8 @@ export const CR_Stock_CTS = async (req, res) => {
     return res.status(500).json({ mensajeError: error.message });
   }
 };
+
+
 
 // Eliminar registro de stock
 export const ER_Stock_CTS = async (req, res) => {
