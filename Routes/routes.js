@@ -65,7 +65,7 @@ import {
   OBR_Stock_CTS,
   CR_Stock_CTS,
   ER_Stock_CTS,
-  UR_Stock_CTS,
+  PUT_Stock_ById,
   ER_StockPorProducto,
   DISTRIBUIR_Stock_CTS,
   TRANSFERIR_Stock_CTS,
@@ -174,7 +174,7 @@ router.get('/stock', OBRS_Stock_CTS);
 router.get('/stock/:id', OBR_Stock_CTS);
 router.post('/stock', CR_Stock_CTS);
 router.delete('/stock/:id', ER_Stock_CTS);
-router.put('/stock/:id', UR_Stock_CTS);
+router.put('/stock/:id', PUT_Stock_ById);
 router.delete('/stock/producto/:id', ER_StockPorProducto);
 // Ruta para distribuir stock por talle
 router.post('/distribuir', DISTRIBUIR_Stock_CTS);

@@ -1395,3 +1395,122 @@ export const DUPLICAR_Producto_CTS = async (req, res) => {
     return res.status(500).json({ mensajeError: err.message });
   }
 };
+
+export const PUT_Stock_ById = async (req, res) => {
+  const id = Number(req.params.id);
+  try {
+    let {
+      producto_id,          // opcional, si lo enviás debe coincidir
+      local_id,
+      lugar_id,
+      estado_id,
+      cantidad = 0,
+      en_exhibicion,
+      reemplazar = true,    // true=set exact; false=sumar
+      codigo_sku            // ignorado en edición salvo que quieras forzar
+    } = req.body || {};
+
+    console.log('PUT_Stock_ById -> id=%s body=%o', req.params.id, req.body);
+
+    if (!id || !local_id || !lugar_id || !estado_id) {
+      return res.status(400).json({ mensajeError: 'Faltan campos obligatorios.' });
+    }
+
+    const row = await StockModel.findByPk(id);
+    if (!row) return res.status(404).json({ mensajeError: 'Fila no encontrada.' });
+
+    if (producto_id && Number(producto_id) !== Number(row.producto_id)) {
+      return res.status(400).json({ mensajeError: 'No se puede cambiar producto_id en edición.' });
+    }
+    const prodId = Number(row.producto_id);
+
+    // ¿cambió el combo?
+    const sameCombo =
+      Number(row.local_id)  === Number(local_id)  &&
+      Number(row.lugar_id)  === Number(lugar_id)  &&
+      Number(row.estado_id) === Number(estado_id);
+
+    await db.transaction(async (t) => {
+      if (sameCombo) {
+        // ✅ Actualización simple en la MISMA fila
+        const nuevaCantidad = reemplazar
+          ? Math.max(0, Number(cantidad) || 0)
+          : Math.max(0, Number(row.cantidad || 0) + (Number(cantidad) || 0));
+
+        await row.update(
+          {
+            cantidad: nuevaCantidad,
+            en_exhibicion: typeof en_exhibicion === 'boolean'
+              ? en_exhibicion
+              : row.en_exhibicion
+          },
+          { transaction: t }
+        );
+        return;
+      }
+
+      // 🔁 Cambió el combo → buscar target
+      const target = await StockModel.findOne({
+        where: {
+          producto_id: prodId,
+          local_id: Number(local_id),
+          lugar_id: Number(lugar_id),
+          estado_id: Number(estado_id)
+        },
+        transaction: t
+      });
+
+      if (target) {
+        // 🧩 Merge: mover cantidad a target y borrar original
+        const cantNueva = reemplazar
+          ? Math.max(0, Number(cantidad) || 0)
+          : Math.max(0, Number(target.cantidad || 0) + (Number(cantidad) || 0));
+
+        await target.update(
+          {
+            cantidad: cantNueva,
+            en_exhibicion: typeof en_exhibicion === 'boolean'
+              ? en_exhibicion
+              : target.en_exhibicion
+          },
+          { transaction: t }
+        );
+        // Opcional: si querés preservar histórico con cantidad=0, reemplazá destroy por update({cantidad:0})
+        await row.destroy({ transaction: t });
+        return;
+      }
+
+      // ✳️ No hay target: actualizar MISMA fila al nuevo combo + regenerar SKU
+      const producto = await ProductosModel.findByPk(prodId, { transaction: t });
+      const localRow  = await LocalesModel.findByPk(local_id, { attributes: ['id','nombre','codigo'], transaction: t });
+      const lugarRow  = await LugaresModel.findByPk(lugar_id, { attributes: ['id','nombre'], transaction: t });
+      const estadoRow = await EstadosModel.findByPk(estado_id, { attributes: ['id','nombre'], transaction: t });
+
+      const baseSku =
+        (producto?.codigo_sku || '').trim() ||
+        `SKU-${prodId}`;
+
+      const candidate = buildSkuCandidate(baseSku, localRow, lugarRow, estadoRow);
+      const finalSku  = await ensureUniqueSkuGlobal(candidate, t);
+
+      await row.update(
+        {
+          local_id: Number(local_id),
+          lugar_id: Number(lugar_id),
+          estado_id: Number(estado_id),
+          cantidad: Math.max(0, Number(cantidad) || 0),
+          en_exhibicion: typeof en_exhibicion === 'boolean'
+            ? en_exhibicion
+            : row.en_exhibicion,
+          codigo_sku: finalSku
+        },
+        { transaction: t }
+      );
+    });
+
+    return res.json({ message: 'Stock actualizado.', stock: await StockModel.findByPk(id) });
+  } catch (err) {
+    console.error('PUT_Stock_ById:', err);
+    return res.status(500).json({ mensajeError: err.message });
+  }
+};
