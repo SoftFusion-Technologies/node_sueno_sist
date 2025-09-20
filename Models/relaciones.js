@@ -50,6 +50,27 @@ import { LogModel } from './Seguridad/MD_TB_Logs.js';
 // RELACIONES LOGS - USUARIOS
 
 import { PedidoStockModel } from './Stock/MD_TB_PedidoStock.js';
+
+// RELACIONES MODULO DE BANCOS - INI
+import { BancoModel } from './Bancos/MD_TB_Bancos.js';
+import { BancoCuentaModel } from './Bancos/MD_TB_BancoCuentas.js';
+import { BancoMovimientoModel } from './Bancos/MD_TB_BancoMovimientos.js';
+// RELACIONES MODULO DE BANCOS - FIN
+
+// RELACIONES MODULO DE CHEQUES - INI
+import { ChequeraModel } from './Cheques/MD_TB_Chequeras.js';
+import { ChequeModel } from './Cheques/MD_TB_Cheques.js';
+import { ChequeMovimientoModel } from './Cheques/MD_TB_ChequeMovimientos.js';
+// imagenes de cheques
+import { ChequeImagenModel } from './Cheques/MD_TB_ChequeImagenes.js';
+import { ChequeImagenThumbModel } from './Cheques/MD_TB_ChequeImagenThumbs.js';
+import { ChequeImagenEventoModel } from './Cheques/MD_TB_ChequeImagenEventos.js';
+// RELACIONES MODULO DE CHEQUES - FIN
+
+// RELACIONES MODULO DE TESORERIA - INI
+import { TesoFlujoModel } from './Tesoreria/MD_TB_TesoFlujo.js';
+// RELACIONES MODULO DE TESORERIA - FIN
+
 // Relaciones de Stock con otras tablas
 StockModel.belongsTo(ProductosModel, { foreignKey: 'producto_id' });
 StockModel.belongsTo(LocalesModel, { foreignKey: 'local_id' });
@@ -265,3 +286,148 @@ PedidoStockModel.belongsTo(UserModel, {
   as: 'creador',
   foreignKey: 'creado_por'
 });
+
+// RELACIONES MODULO DE BANCOS - INI
+// Bancos ↔ Cuentas (1:N)
+BancoModel.hasMany(BancoCuentaModel, {
+  as: 'cuentas',
+  foreignKey: 'banco_id',
+  onUpdate: 'CASCADE',
+  onDelete: 'RESTRICT'
+});
+BancoCuentaModel.belongsTo(BancoModel, {
+  as: 'banco',
+  foreignKey: 'banco_id',
+  onUpdate: 'CASCADE',
+  onDelete: 'RESTRICT'
+});
+
+// Cuentas ↔ Movimientos (1:N)
+BancoCuentaModel.hasMany(BancoMovimientoModel, {
+  as: 'movimientos',
+  foreignKey: 'banco_cuenta_id',
+  onUpdate: 'CASCADE',
+  onDelete: 'RESTRICT'
+});
+BancoMovimientoModel.belongsTo(BancoCuentaModel, {
+  as: 'cuenta',
+  foreignKey: 'banco_cuenta_id',
+  onUpdate: 'CASCADE',
+  onDelete: 'RESTRICT'
+});
+// RELACIONES MODULO DE BANCOS - FIN
+
+
+// RELACIONES MODULO DE CHEQUES - INI
+// BancoCuentas ↔ Chequeras (1:N)
+BancoCuentaModel.hasMany(ChequeraModel, {
+  as: 'chequeras',
+  foreignKey: 'banco_cuenta_id',
+  onUpdate: 'CASCADE',
+  onDelete: 'RESTRICT'
+});
+ChequeraModel.belongsTo(BancoCuentaModel, {
+  as: 'cuenta',
+  foreignKey: 'banco_cuenta_id',
+  onUpdate: 'CASCADE',
+  onDelete: 'RESTRICT'
+});
+
+// Bancos ↔ Cheques (N:1)  (el banco del cheque)
+BancoModel.hasMany(ChequeModel, {
+  as: 'cheques',
+  foreignKey: 'banco_id',
+  onUpdate: 'CASCADE',
+  onDelete: 'SET NULL'
+});
+ChequeModel.belongsTo(BancoModel, {
+  as: 'banco',
+  foreignKey: 'banco_id',
+  onUpdate: 'CASCADE',
+  onDelete: 'SET NULL'
+});
+
+// Cheques ↔ Movimientos (1:N)
+ChequeModel.hasMany(ChequeMovimientoModel, {
+  as: 'movimientos',
+  foreignKey: 'cheque_id',
+  onUpdate: 'CASCADE',
+  onDelete: 'CASCADE'
+});
+
+ChequeMovimientoModel.belongsTo(ChequeModel, {
+  as: 'cheque',
+  foreignKey: 'cheque_id',
+  onUpdate: 'CASCADE',
+  onDelete: 'CASCADE'
+});
+
+// Chequeras ↔ Cheques (1:N) (solo aplica a emitidos)
+ChequeraModel.hasMany(ChequeModel, {
+  as: 'cheques_emitidos',
+  foreignKey: 'chequera_id',
+  onUpdate: 'CASCADE',
+  onDelete: 'SET NULL'
+});
+ChequeModel.belongsTo(ChequeraModel, {
+  as: 'chequera',
+  foreignKey: 'chequera_id',
+  onUpdate: 'CASCADE',
+  onDelete: 'SET NULL'
+});
+
+
+// Cheques ↔ Imágenes (1:N)
+ChequeModel.hasMany(ChequeImagenModel, {
+  as: 'imagenes',
+  foreignKey: 'cheque_id',
+  onUpdate: 'CASCADE',
+  onDelete: 'CASCADE'
+});
+ChequeImagenModel.belongsTo(ChequeModel, {
+  as: 'cheque',
+  foreignKey: 'cheque_id',
+  onUpdate: 'CASCADE',
+  onDelete: 'CASCADE'
+});
+
+// Imágenes ↔ Thumbs (1:N)
+ChequeImagenModel.hasMany(ChequeImagenThumbModel, {
+  as: 'thumbs',
+  foreignKey: 'imagen_id',
+  onUpdate: 'CASCADE',
+  onDelete: 'CASCADE'
+});
+ChequeImagenThumbModel.belongsTo(ChequeImagenModel, {
+  as: 'imagen',
+  foreignKey: 'imagen_id',
+  onUpdate: 'CASCADE',
+  onDelete: 'CASCADE'
+});
+
+// Imágenes/Eventos (N:1) y Cheques/Eventos (N:1)
+ChequeImagenEventoModel.belongsTo(ChequeImagenModel, {
+  as: 'imagen',
+  foreignKey: 'imagen_id',
+  onUpdate: 'CASCADE',
+  onDelete: 'CASCADE'
+});
+ChequeImagenEventoModel.belongsTo(ChequeModel, {
+  as: 'cheque',
+  foreignKey: 'cheque_id',
+  onUpdate: 'CASCADE',
+  onDelete: 'CASCADE'
+});
+ChequeModel.hasMany(ChequeImagenEventoModel, {
+  as: 'imagen_eventos',
+  foreignKey: 'cheque_id',
+  onUpdate: 'CASCADE',
+  onDelete: 'CASCADE'
+});
+// RELACIONES MODULO DE CHEQUES - FIN
+
+/* ---------------------------
+   TESORERÍA
+---------------------------- */
+// TesoFlujo se mantiene "desacoplado": no tiene FK dura a cheques.
+// (Lo consultamos por origen_tipo/origen_id desde servicios)
