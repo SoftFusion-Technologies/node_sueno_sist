@@ -50,8 +50,11 @@ export const BancoMovimientoModel = db.define(
       type: DataTypes.ENUM(
         'cheque',
         'transferencia',
+        'venta',
+        'compra',
+        'pago',
         'deposito',
-        'ajuste',
+        'conciliacion',
         'otro'
       ),
       allowNull: false,

@@ -63,7 +63,6 @@ import { ChequeModel } from './Cheques/MD_TB_Cheques.js';
 import { ChequeMovimientoModel } from './Cheques/MD_TB_ChequeMovimientos.js';
 // imagenes de cheques
 import { ChequeImagenModel } from './Cheques/MD_TB_ChequeImagenes.js';
-import { ChequeImagenThumbModel } from './Cheques/MD_TB_ChequeImagenThumbs.js';
 import { ChequeImagenEventoModel } from './Cheques/MD_TB_ChequeImagenEventos.js';
 // RELACIONES MODULO DE CHEQUES - FIN
 
@@ -391,19 +390,7 @@ ChequeImagenModel.belongsTo(ChequeModel, {
   onDelete: 'CASCADE'
 });
 
-// Imágenes ↔ Thumbs (1:N)
-ChequeImagenModel.hasMany(ChequeImagenThumbModel, {
-  as: 'thumbs',
-  foreignKey: 'imagen_id',
-  onUpdate: 'CASCADE',
-  onDelete: 'CASCADE'
-});
-ChequeImagenThumbModel.belongsTo(ChequeImagenModel, {
-  as: 'imagen',
-  foreignKey: 'imagen_id',
-  onUpdate: 'CASCADE',
-  onDelete: 'CASCADE'
-});
+
 
 // Imágenes/Eventos (N:1) y Cheques/Eventos (N:1)
 ChequeImagenEventoModel.belongsTo(ChequeImagenModel, {

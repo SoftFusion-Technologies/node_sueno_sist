@@ -13,6 +13,9 @@ import { login, authenticateToken } from './Security/auth.js'; // Importa las fu
 import { PORT } from './DataBase/config.js';
 import mysql from 'mysql2/promise'; // Usar mysql2 para las promesas
 import cron from 'node-cron';
+import path from 'node:path';
+
+const BASE_UPLOAD_DIR = path.join(process.cwd(), 'uploads');
 
 import './Models/relaciones.js';
 // Importar relaciones
@@ -128,6 +131,17 @@ app.get('/', (req, res) => {
     res.end('404 ERROR');
   }
 });
+
+// sirve archivos estáticos
+app.use(
+  '/uploads',
+  express.static(BASE_UPLOAD_DIR, {
+    // opcional: evita problemas de políticas de recursos cruzados
+    setHeaders(res) {
+      res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+    }
+  })
+);
 
 // Ejemplo para historial completo
 // GET /ventas-historial?desde=2025-07-01&hasta=2025-07-31&local=1&vendedor=3&cliente=5

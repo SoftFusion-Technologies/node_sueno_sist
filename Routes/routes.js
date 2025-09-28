@@ -698,4 +698,239 @@ router.delete('/producto-proveedor/historial/:id', ER_PPH_CTS);
 // MODULO DE PROVEDORES FIN
 // -------------------------
 
+// MODULO DE BANCOS INI - 20-09-2025 Benjamin Orellana
+// -------------------------
+import {
+  OBRS_Bancos_CTS,
+  OBR_Banco_CTS,
+  CR_Banco_CTS,
+  UR_Banco_CTS,
+  ER_Banco_CTS
+} from '../Controllers/Bancos/CTS_TB_Bancos.js';
+
+router.get('/bancos', OBRS_Bancos_CTS);
+router.get('/bancos/:id', OBR_Banco_CTS);
+router.post('/bancos', CR_Banco_CTS);
+router.put('/bancos/:id', UR_Banco_CTS);
+router.patch('/bancos/:id', UR_Banco_CTS);
+router.delete('/bancos/:id', ER_Banco_CTS);
+
+// Banco Cuentas
+import {
+  OBRS_BancoCuentas_CTS,
+  OBR_BancoCuenta_CTS,
+  CR_BancoCuenta_CTS,
+  UR_BancoCuenta_CTS,
+  ER_BancoCuenta_CTS
+} from '../Controllers/Bancos/CTS_TB_BancoCuentas.js';
+
+router.get('/banco-cuentas', OBRS_BancoCuentas_CTS);
+router.get('/banco-cuentas/:id', OBR_BancoCuenta_CTS);
+router.post('/banco-cuentas', CR_BancoCuenta_CTS);
+router.put('/banco-cuentas/:id', UR_BancoCuenta_CTS);
+router.patch('/banco-cuentas/:id', UR_BancoCuenta_CTS);
+router.delete('/banco-cuentas/:id', ER_BancoCuenta_CTS);
+
+// Banco Movimientos
+import {
+  OBRS_BancoMovimientos_CTS,
+  OBR_BancoMovimiento_CTS,
+  CR_BancoMovimiento_CTS,
+  UR_BancoMovimiento_CTS,
+  ER_BancoMovimiento_CTS,
+  // GET_SaldoCuenta_CTS,
+  // GET_ResumenCuenta_CTS,
+  EXP_BancoMovimientos_CSV_CTS
+} from '../Controllers/Bancos/CTS_TB_BancoMovimientos.js';
+
+router.get('/banco-movimientos', OBRS_BancoMovimientos_CTS);
+router.get('/banco-movimientos/:id', OBR_BancoMovimiento_CTS);
+router.post('/banco-movimientos', CR_BancoMovimiento_CTS);
+router.put('/banco-movimientos/:id', UR_BancoMovimiento_CTS);
+router.patch('/banco-movimientos/:id', UR_BancoMovimiento_CTS);
+router.delete('/banco-movimientos/:id', ER_BancoMovimiento_CTS);
+
+// KPIs / Reportes
+// router.get('/banco-cuentas/:id/saldo', GET_SaldoCuenta_CTS);
+// router.get('/banco-cuentas/:id/resumen', GET_ResumenCuenta_CTS);
+router.get('/banco-movimientos/export.csv', EXP_BancoMovimientos_CSV_CTS);
+
+import {
+  GET_SaldoCuenta_CTS,
+  GET_ResumenCuenta_CTS
+} from '../Controllers/Bancos/CTS_TB_BancoCuentasKPIs.js';
+
+// Endpoints
+router.get('/banco-cuentas/:id/saldo', GET_SaldoCuenta_CTS);
+router.get('/banco-cuentas/:id/resumen', GET_ResumenCuenta_CTS);
+
+// MODULO DE BANCOS FIN - 20-09-2025 Benjamin Orellana
+// -------------------------
+
+// MODULO DE CHEQUES INI - 20-09-2025 Benjamin Orellana
+// -------------------------
+// Chequeras
+import {
+  OBRS_Chequeras_CTS,
+  OBR_Chequera_CTS,
+  CR_Chequera_CTS,
+  UR_Chequera_CTS,
+  ER_Chequera_CTS
+} from '../Controllers/Cheques/CTS_TB_Chequeras.js';
+
+router.get('/chequeras', OBRS_Chequeras_CTS);
+router.get('/chequeras/:id', OBR_Chequera_CTS);
+router.post('/chequeras', CR_Chequera_CTS);
+router.put('/chequeras/:id', UR_Chequera_CTS);
+router.patch('/chequeras/:id', UR_Chequera_CTS);
+router.delete('/chequeras/:id', ER_Chequera_CTS);
+
+import { OBRS_AllChequeMovimientos_CTS } from '../Controllers/Cheques/CTS_TB_ChequeMovimientos.js';
+// ✅ GLOBAL (sin cheque_id) — DEBE IR ANTES
+router.get('/cheques/movimientos', OBRS_AllChequeMovimientos_CTS);
+
+
+import {
+  OBRS_ChequesPorChequera_CTS,
+  OBRS_Cheques_CTS,
+  OBR_Cheque_CTS,
+  CR_Cheque_CTS,
+  UR_Cheque_CTS,
+  ER_Cheque_CTS,
+  TR_Depositar_Cheque_CTS,
+  TR_Acreditar_Cheque_CTS,
+  TR_Rechazar_Cheque_CTS,
+  TR_AplicarProveedor_Cheque_CTS,
+  TR_Entregar_Cheque_CTS,
+  TR_Compensar_Cheque_CTS,
+  TR_Anular_Cheque_CTS
+} from '../Controllers/Cheques/CTS_TB_Cheques.js';
+
+router.get('/chequeras/:id/cheques', OBRS_ChequesPorChequera_CTS);
+router.get('/cheques', OBRS_Cheques_CTS);
+router.get('/cheques/:id', OBR_Cheque_CTS);
+router.post('/cheques', CR_Cheque_CTS);
+router.put('/cheques/:id', UR_Cheque_CTS);
+router.patch('/cheques/:id', UR_Cheque_CTS);
+router.delete('/cheques/:id', ER_Cheque_CTS);
+
+// Transiciones de estado
+router.patch('/cheques/:id/depositar', TR_Depositar_Cheque_CTS);
+router.patch('/cheques/:id/acreditar', TR_Acreditar_Cheque_CTS);
+router.patch('/cheques/:id/rechazar', TR_Rechazar_Cheque_CTS);
+router.patch(
+  '/cheques/:id/aplicar-a-proveedor',
+  TR_AplicarProveedor_Cheque_CTS
+);
+router.patch('/cheques/:id/entregar', TR_Entregar_Cheque_CTS);
+router.patch('/cheques/:id/compensar', TR_Compensar_Cheque_CTS);
+router.patch('/cheques/:id/anular', TR_Anular_Cheque_CTS);
+
+import {
+  uploadChequeImagenMulter,
+  OBRS_ChequeImagenes_CTS,
+  OBR_ChequeImagen_CTS,
+  CR_ChequeImagen_CTS,
+  DWN_ChequeImagen_CTS,
+  UR_ChequeImagen_CTS,
+  ER_ChequeImagen_CTS
+} from '../Controllers/Cheques/CTS_TB_ChequeImagenes.js';
+
+
+import {
+  OBRS_ChequeImagenEventos_CTS,
+  OBR_ChequeImagenEvento_CTS,
+  CR_ChequeImagenEvento_CTS,
+  ER_ChequeImagenEvento_CTS
+} from '../Controllers/Cheques/CTS_TB_ChequeImagenEventos.js';
+
+// ---------------- Rutas ----------------
+
+// Listar imágenes
+router.get('/cheques/:cheque_id/imagenes', OBRS_ChequeImagenes_CTS);
+
+// Descargar imagen (antes que la genérica)
+router.get('/cheques/:cheque_id/imagenes/:id/download', DWN_ChequeImagen_CTS);
+
+
+// Eventos (antes de la genérica de :id)
+router.get(
+  '/cheques/:cheque_id/imagenes/eventos',
+  OBRS_ChequeImagenEventos_CTS
+);
+router.get(
+  '/cheques/:cheque_id/imagenes/eventos/:id',
+  OBR_ChequeImagenEvento_CTS
+);
+router.post('/cheques/:cheque_id/imagenes/eventos', CR_ChequeImagenEvento_CTS);
+router.delete(
+  '/cheques/:cheque_id/imagenes/eventos/:id',
+  ER_ChequeImagenEvento_CTS
+);
+
+// Subir (multer -> controller)
+router.post(
+  '/cheques/:cheque_id/imagenes',
+  uploadChequeImagenMulter,
+  CR_ChequeImagen_CTS
+);
+
+// --------- GENÉRICAS AL FINAL ---------
+
+// Ver detalle
+router.get('/cheques/:cheque_id/imagenes/:id', OBR_ChequeImagen_CTS);
+
+// Editar
+router.patch('/cheques/:cheque_id/imagenes/:id', UR_ChequeImagen_CTS);
+
+// Eliminar
+router.delete('/cheques/:cheque_id/imagenes/:id', ER_ChequeImagen_CTS);
+import {
+  OBRS_ChequeMovimientos_CTS,
+  OBR_ChequeMovimiento_CTS,
+  CR_ChequeMovimiento_CTS,
+  UR_ChequeMovimiento_CTS,
+  ER_ChequeMovimiento_CTS
+} from '../Controllers/Cheques/CTS_TB_ChequeMovimientos.js';
+
+//  ESPECÍFICAS (con cheque_id)
+router.get('/cheques/:cheque_id/movimientos', OBRS_ChequeMovimientos_CTS);
+router.get('/cheques/:cheque_id/movimientos/:id', OBR_ChequeMovimiento_CTS);
+router.post('/cheques/:cheque_id/movimientos', CR_ChequeMovimiento_CTS);
+router.put('/cheques/:cheque_id/movimientos/:id', UR_ChequeMovimiento_CTS);
+router.patch('/cheques/:cheque_id/movimientos/:id', UR_ChequeMovimiento_CTS);
+router.delete('/cheques/:cheque_id/movimientos/:id', ER_ChequeMovimiento_CTS);
+
+// MODULO DE CHEQUES FIN - 20-09-2025 Benjamin Orellana
+// -------------------------
+
+// MODULO DE TESORERIA INI - 21-09-2025 Benjamin Orellana
+// -------------------------
+
+// Tesorería - Teso Flujos
+import {
+  OBRS_TesoFlujo_CTS,
+  OBR_TesoFlujo_CTS,
+  CR_TesoFlujo_CTS,
+  UR_TesoFlujo_CTS,
+  ER_TesoFlujo_CTS,
+  GET_TesoFlujo_Proyeccion_CTS,
+  EXP_TesoFlujo_CSV_CTS
+} from '../Controllers/Tesoreria/CTS_TB_TesoFlujo.js';
+
+// Proyección y export
+router.get('/teso-flujo/proyeccion', GET_TesoFlujo_Proyeccion_CTS);
+router.get('/teso-flujo/export.csv', EXP_TesoFlujo_CSV_CTS);
+
+router.get('/teso-flujo', OBRS_TesoFlujo_CTS);
+router.get('/teso-flujo/:id', OBR_TesoFlujo_CTS);
+router.post('/teso-flujo', CR_TesoFlujo_CTS);
+router.put('/teso-flujo/:id', UR_TesoFlujo_CTS);
+router.patch('/teso-flujo/:id', UR_TesoFlujo_CTS);
+router.delete('/teso-flujo/:id', ER_TesoFlujo_CTS);
+
+
+// MODULO DE TESORERIA FIN - 21-09-2025 Benjamin Orellana
+// -------------------------
+
 export default router;
