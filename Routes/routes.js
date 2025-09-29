@@ -574,6 +574,20 @@ router.delete('/pedidos/:id', ER_PedidoStock_CTS); // cancelar
 // -------------------------
 
 import {
+  OBRS_Proveedor_Cheques_CTS,
+  GET_Proveedor_Cheques_Resumen_CTS
+} from '../Controllers/Proveedores/CTS_PRV_Cheques.js';
+
+// Rutas específicas de cheques por proveedor
+router.get('/proveedores/:id/cheques', OBRS_Proveedor_Cheques_CTS);
+router.get(
+  '/proveedores/:id/cheques/resumen',
+  GET_Proveedor_Cheques_Resumen_CTS
+);
+
+
+
+import {
   OBRS_Proveedores_CTS,
   OBR_Proveedor_CTS,
   CR_Proveedor_CTS,
@@ -928,9 +942,6 @@ router.post('/teso-flujo', CR_TesoFlujo_CTS);
 router.put('/teso-flujo/:id', UR_TesoFlujo_CTS);
 router.patch('/teso-flujo/:id', UR_TesoFlujo_CTS);
 router.delete('/teso-flujo/:id', ER_TesoFlujo_CTS);
-
-
 // MODULO DE TESORERIA FIN - 21-09-2025 Benjamin Orellana
 // -------------------------
-
 export default router;

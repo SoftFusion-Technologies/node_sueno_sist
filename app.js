@@ -25,7 +25,7 @@ import { timeRouter } from './Routes/time.routes.js';
 import { timeGuard } from './Middlewares/timeGuard.js';
 import { initAuthoritativeTime } from './Utils/authoritativeTime.js';
 // ...
-await initAuthoritativeTime?.();  // si tu Node permite top-level await
+await initAuthoritativeTime?.(); // si tu Node permite top-level await
 // o:
 // initAuthoritativeTime();
 
@@ -40,28 +40,25 @@ if (process.env.NODE_ENV !== 'production') {
 
 const app = express();
 
-/* 🔑 CORS configurado con whitelist y credenciales */
-const CORS_WHITELIST = [
-  'http://localhost:5173',
-  'http://127.0.0.1:5173'
-];
+/*  🔑 CORS configurado con whitelist y credenciales */
+const CORS_WHITELIST = ['http://localhost:5173', 'http://127.0.0.1:5173'];
 
 const corsOptions = {
-  origin: function (origin, callback) {
-    // permitir también requests sin origin (ej. curl, Postman)
-    if (!origin || CORS_WHITELIST.includes(origin)) {
-      return callback(null, true);
-    }
-    return callback(new Error('Not allowed by CORS'));
+  origin(origin, cb) {
+    if (!origin || CORS_WHITELIST.includes(origin)) return cb(null, true);
+    return cb(new Error('Not allowed by CORS'));
   },
-  credentials: true, // 👈 permite cookies y headers con credentials: 'include'
+  credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: [
     'Content-Type',
     'Authorization',
+    'X-User-Id', // ✅ agrega tu header custom
+    'x-user-id', // (opcional) por si el browser lo baja en minúsculas
     'x-client-reported-time',
     'x-time-guard-reason'
-  ]
+  ],
+  optionsSuccessStatus: 204
 };
 
 app.use(cors(corsOptions));
