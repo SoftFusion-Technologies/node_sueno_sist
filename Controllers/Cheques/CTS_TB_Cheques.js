@@ -15,7 +15,7 @@
  */
 
 import db from '../../DataBase/db.js';
-import { Op, literal, Transaction ,fn,col} from 'sequelize';
+import { Op, literal, Transaction, fn, col } from 'sequelize';
 
 import { BancoModel } from '../../Models/Bancos/MD_TB_Bancos.js';
 import { BancoCuentaModel } from '../../Models/Bancos/MD_TB_BancoCuentas.js';
@@ -28,6 +28,8 @@ import { ChequeMovimientoModel } from '../../Models/Cheques/MD_TB_ChequeMovimien
 import { TesoFlujoModel } from '../../Models/Tesoreria/MD_TB_TesoFlujo.js';
 
 import { registrarLog } from '../../Helpers/registrarLog.js';
+
+import { AppError, toHttpError } from '../../Utils/httpErrors.js';
 
 /* =========================================================================
  * Helpers
@@ -112,7 +114,9 @@ export const OBRS_ChequesPorChequera_CTS = async (req, res) => {
         {
           model: BancoCuentaModel,
           as: 'cuenta',
-          include: [{ model: BancoModel, as: 'banco', attributes: ['id', 'nombre'] }]
+          include: [
+            { model: BancoModel, as: 'banco', attributes: ['id', 'nombre'] }
+          ]
         }
       ]
     });
@@ -125,12 +129,21 @@ export const OBRS_ChequesPorChequera_CTS = async (req, res) => {
     if (q && q.trim()) {
       const like = { [Op.like]: `%${q.trim()}%` };
       // busco por número y beneficiario/observaciones
-      where[Op.or] = [{ numero: isNaN(Number(q)) ? undefined : Number(q) }, { beneficiario_nombre: like }, { observaciones: like }].filter(Boolean);
+      where[Op.or] = [
+        { numero: isNaN(Number(q)) ? undefined : Number(q) },
+        { beneficiario_nombre: like },
+        { observaciones: like }
+      ].filter(Boolean);
     }
     if (estado) where.estado = estado;
     if (tipo) where.tipo = tipo; // aunque en chequera normalmente serán "emitidos"
 
-    const camposFecha = new Set(['fecha_emision', 'fecha_vencimiento', 'fecha_cobro_prevista', 'created_at']);
+    const camposFecha = new Set([
+      'fecha_emision',
+      'fecha_vencimiento',
+      'fecha_cobro_prevista',
+      'created_at'
+    ]);
     const campo = camposFecha.has(fechaCampo) ? fechaCampo : 'fecha_emision';
     if (desde || hasta) {
       where[campo] = {};
@@ -139,9 +152,21 @@ export const OBRS_ChequesPorChequera_CTS = async (req, res) => {
     }
 
     // Orden seguro
-    const validCols = ['id', 'numero', 'monto', 'estado', 'created_at', 'updated_at', 'fecha_emision', 'fecha_vencimiento', 'fecha_cobro_prevista'];
+    const validCols = [
+      'id',
+      'numero',
+      'monto',
+      'estado',
+      'created_at',
+      'updated_at',
+      'fecha_emision',
+      'fecha_vencimiento',
+      'fecha_cobro_prevista'
+    ];
     const colName = validCols.includes(orderBy) ? orderBy : 'numero';
-    const dirName = ['ASC', 'DESC'].includes(String(orderDir).toUpperCase()) ? String(orderDir).toUpperCase() : 'ASC';
+    const dirName = ['ASC', 'DESC'].includes(String(orderDir).toUpperCase())
+      ? String(orderDir).toUpperCase()
+      : 'ASC';
 
     const pageNum = Math.max(parseInt(page, 10) || 1, 1);
     const limitNum = Math.min(Math.max(parseInt(limit, 10) || 25, 1), 200);
@@ -177,7 +202,17 @@ export const OBRS_ChequesPorChequera_CTS = async (req, res) => {
       where,
       include: [
         { model: BancoModel, as: 'banco', attributes: ['id', 'nombre'] },
-        { model: ChequeraModel, as: 'chequera', attributes: ['id', 'descripcion', 'nro_desde', 'nro_hasta', 'proximo_nro'] }
+        {
+          model: ChequeraModel,
+          as: 'chequera',
+          attributes: [
+            'id',
+            'descripcion',
+            'nro_desde',
+            'nro_hasta',
+            'proximo_nro'
+          ]
+        }
       ],
       order: [[colName, dirName]],
       limit: limitNum,
@@ -187,7 +222,9 @@ export const OBRS_ChequesPorChequera_CTS = async (req, res) => {
     const totalPages = Math.max(Math.ceil(total / limitNum), 1);
 
     // Métrica de uso del rango (sólo informativa)
-    const usados = await ChequeModel.count({ where: { chequera_id: chequeraId } });
+    const usados = await ChequeModel.count({
+      where: { chequera_id: chequeraId }
+    });
     const rango = chequera.nro_hasta - chequera.nro_desde + 1;
     const uso = rango > 0 ? Math.round((usados / rango) * 100) : 0;
 
@@ -215,7 +252,12 @@ export const OBRS_ChequesPorChequera_CTS = async (req, res) => {
         cuenta: {
           id: chequera.cuenta?.id,
           nombre_cuenta: chequera.cuenta?.nombre_cuenta,
-          banco: chequera.cuenta?.banco ? { id: chequera.cuenta.banco.id, nombre: chequera.cuenta.banco.nombre } : null
+          banco: chequera.cuenta?.banco
+            ? {
+                id: chequera.cuenta.banco.id,
+                nombre: chequera.cuenta.banco.nombre
+              }
+            : null
         },
         uso: { usados, rango, porcentaje: uso }
       }
@@ -450,73 +492,134 @@ export const CR_Cheque_CTS = async (req, res) => {
   const t = await db.transaction({
     isolationLevel: Transaction.ISOLATION_LEVELS.READ_COMMITTED
   });
+
   try {
-    // Validaciones mínimas
+    // 1) Validaciones de negocio (siempre via AppError)
     if (!['recibido', 'emitido'].includes(body.tipo)) {
-      throw new Error('tipo inválido (recibido/emitido)');
+      throw new AppError({
+        status: 400,
+        code: 'TIPO_INVALIDO',
+        message: 'Tipo inválido (recibido/emitido)',
+        tips: ['Elegí recibido o emitido.']
+      });
+    }
+    if (!body.numero || Number(body.numero) <= 0) {
+      throw new AppError({
+        status: 400,
+        code: 'NUMERO_INVALIDO',
+        message: 'Número de cheque inválido',
+        tips: ['Ingresá un número mayor a 0.'],
+        details: { field: 'numero' }
+      });
+    }
+    if (!body.monto || Number(body.monto) <= 0) {
+      throw new AppError({
+        status: 400,
+        code: 'MONTO_INVALIDO',
+        message: 'Monto inválido',
+        tips: ['Ingresá un monto mayor a 0.'],
+        details: { field: 'monto' }
+      });
     }
 
-    // Inferencias
+    // 2) Inferencias (y lock solo donde corresponde)
     let banco_id = body.banco_id ?? null;
+
     if (body.tipo === 'emitido') {
-      if (!body.chequera_id)
-        throw new Error('chequera_id es requerido para cheques emitidos');
+      if (!body.chequera_id) {
+        throw new AppError({
+          status: 400,
+          code: 'CHEQUERA_REQUERIDA',
+          message: 'chequera_id es requerido para cheques emitidos',
+          tips: ['Seleccioná una chequera para emitir el cheque.'],
+          details: { field: 'chequera_id' }
+        });
+      }
+
+      // Lock SOLO sobre la chequera (mínimo imprescindible)
       const chequera = await ChequeraModel.findByPk(body.chequera_id, {
         include: [
           {
             model: BancoCuentaModel,
             as: 'cuenta',
-            include: [{ model: BancoModel, as: 'banco' }]
+            attributes: ['id', 'banco_id'],
+            include: [{ model: BancoModel, as: 'banco', attributes: ['id'] }]
           }
         ],
         transaction: t,
         lock: t.LOCK.UPDATE
       });
-      if (!chequera) throw new Error('Chequera inexistente');
-      // banco propio
+
+      if (!chequera) {
+        throw new AppError({
+          status: 404,
+          code: 'CHEQUERA_INEXISTENTE',
+          message: 'Chequera inexistente',
+          tips: [
+            'Actualizá la página y volvé a intentar.',
+            'Verificá que la chequera siga activa.'
+          ]
+        });
+      }
+
       banco_id = chequera?.cuenta?.banco?.id ?? null;
-      if (!banco_id)
-        throw new Error('No se pudo inferir el banco propio desde la chequera');
+      if (!banco_id) {
+        throw new AppError({
+          status: 400,
+          code: 'BANCO_NO_INFERIDO',
+          message: 'No se pudo inferir el banco propio desde la chequera',
+          tips: ['Revisá la cuenta y banco configurados para esa chequera.']
+        });
+      }
     } else {
       // recibido
-      if (!banco_id)
-        throw new Error('banco_id es requerido para cheques recibidos');
+      if (!banco_id) {
+        throw new AppError({
+          status: 400,
+          code: 'BANCO_REQUERIDO',
+          message: 'banco_id es requerido para cheques recibidos',
+          tips: ['Seleccioná el banco del cheque recibido.'],
+          details: { field: 'banco_id' }
+        });
+      }
     }
 
-    // Unicidad banco+numero
-    const dup = await ChequeModel.findOne({
-      where: { banco_id, numero: body.numero },
-      transaction: t,
-      lock: t.LOCK.UPDATE
-    });
-    if (dup) throw new Error('Ya existe un cheque con ese banco y número');
+    // 3) Crear cheque (confía en el índice único banco_id+numero)
+    let nuevo;
+    try {
+      nuevo = await ChequeModel.create(
+        {
+          tipo: body.tipo,
+          canal: body.canal || 'C1',
+          banco_id,
+          chequera_id: body.chequera_id ?? null,
+          numero: body.numero,
+          monto: body.monto,
+          fecha_emision: body.fecha_emision ?? null,
+          fecha_vencimiento: body.fecha_vencimiento ?? null,
+          fecha_cobro_prevista: body.fecha_cobro_prevista ?? null,
+          cliente_id: body.cliente_id ?? null,
+          proveedor_id: body.proveedor_id ?? null,
+          venta_id: body.venta_id ?? null,
+          compra_id: body.compra_id ?? null,
+          beneficiario_nombre: body.beneficiario_nombre ?? null,
+          estado: body.tipo === 'recibido' ? 'en_cartera' : 'registrado',
+          motivo_estado: null,
+          observaciones: body.observaciones ?? null,
+          created_by: body.created_by ?? usuario_log_id ?? null,
+          updated_by: body.updated_by ?? usuario_log_id ?? null
+        },
+        { transaction: t }
+      );
+    } catch (e) {
+      if (e.name === 'SequelizeUniqueConstraintError') {
+        // Dejar que el catch externo lo formatee en 409 con tips:
+        throw e;
+      }
+      throw e;
+    }
 
-    const nuevo = await ChequeModel.create(
-      {
-        tipo: body.tipo,
-        canal: body.canal || 'C1',
-        banco_id,
-        chequera_id: body.chequera_id ?? null,
-        numero: body.numero,
-        monto: body.monto,
-        fecha_emision: body.fecha_emision ?? null,
-        fecha_vencimiento: body.fecha_vencimiento ?? null,
-        fecha_cobro_prevista: body.fecha_cobro_prevista ?? null,
-        cliente_id: body.cliente_id ?? null,
-        proveedor_id: body.proveedor_id ?? null,
-        venta_id: body.venta_id ?? null,
-        compra_id: body.compra_id ?? null,
-        beneficiario_nombre: body.beneficiario_nombre ?? null,
-        estado: body.tipo === 'recibido' ? 'en_cartera' : 'registrado',
-        motivo_estado: null,
-        observaciones: body.observaciones ?? null,
-        created_by: body.created_by ?? usuario_log_id ?? null,
-        updated_by: body.updated_by ?? usuario_log_id ?? null
-      },
-      { transaction: t }
-    );
-
-    // Bitácora
+    // 4) Bitácora
     await ChequeMovimientoModel.create(
       {
         cheque_id: nuevo.id,
@@ -528,7 +631,7 @@ export const CR_Cheque_CTS = async (req, res) => {
       { transaction: t }
     );
 
-    // Flujo proyectado
+    // 5) Flujo proyectado
     if (body.tipo === 'recibido' && nuevo.fecha_cobro_prevista) {
       await upsertFlujoCheque({
         t,
@@ -549,8 +652,10 @@ export const CR_Cheque_CTS = async (req, res) => {
       });
     }
 
+    // 6) Commit
     await t.commit();
 
+    // 7) Log best-effort
     try {
       await registrarLog(
         req,
@@ -563,13 +668,28 @@ export const CR_Cheque_CTS = async (req, res) => {
       console.warn('registrarLog falló:', logErr?.message || logErr);
     }
 
-    return res.json({ message: 'Cheque creado correctamente', cheque: nuevo });
-  } catch (error) {
+    return res.json({
+      ok: true,
+      message: 'Cheque creado correctamente',
+      cheque: nuevo
+    });
+  } catch (err) {
     try {
       await t.rollback();
     } catch {}
-    console.error('CR_Cheque_CTS:', error);
-    return res.status(500).json({ mensajeError: error.message });
+    const httpErr = toHttpError(err);
+    console.error('CR_Cheque_CTS:', {
+      code: httpErr.code,
+      message: httpErr.message,
+      raw: err?.message
+    });
+    return res.status(httpErr.status).json({
+      ok: false,
+      code: httpErr.code,
+      mensajeError: httpErr.message,
+      tips: httpErr.tips,
+      details: httpErr.details
+    });
   }
 };
 
@@ -586,56 +706,148 @@ export const UR_Cheque_CTS = async (req, res) => {
   const t = await db.transaction({
     isolationLevel: Transaction.ISOLATION_LEVELS.READ_COMMITTED
   });
+
   try {
+    // 1) Cargar "antes" con lock para edición consistente
     const antes = await ChequeModel.findByPk(id, {
       transaction: t,
       lock: t.LOCK.UPDATE
     });
-    if (!antes)
-      return res.status(404).json({ mensajeError: 'Cheque no encontrado' });
+    if (!antes) {
+      throw new AppError({
+        status: 404,
+        code: 'CHEQUE_NO_ENCONTRADO',
+        message: 'Cheque no encontrado',
+        tips: ['Actualizá la lista y volvé a intentar.']
+      });
+    }
 
-    // Unicidad banco+numero al cambiar
-    const banco_id = body.banco_id ?? antes.banco_id;
-    const numero = body.numero ?? antes.numero;
-    if (
-      Number(banco_id) !== Number(antes.banco_id) ||
-      Number(numero) !== Number(antes.numero)
-    ) {
-      const dup = await ChequeModel.findOne({
-        where: { banco_id, numero, id: { [Op.ne]: id } },
+    // 2) Resolver candidatos
+    let tipo = body.tipo ?? antes.tipo;
+    let canal = body.canal ?? antes.canal;
+    let chequera_id = body.chequera_id ?? antes.chequera_id;
+    let banco_id = body.banco_id ?? antes.banco_id;
+    let numero = body.numero ?? antes.numero;
+    let monto = body.monto ?? antes.monto;
+    let fecha_emision = body.fecha_emision ?? antes.fecha_emision;
+    let fecha_vencimiento = body.fecha_vencimiento ?? antes.fecha_vencimiento;
+    let fecha_cobro_prevista =
+      body.fecha_cobro_prevista ?? antes.fecha_cobro_prevista;
+    let cliente_id = body.cliente_id ?? antes.cliente_id;
+    let proveedor_id = body.proveedor_id ?? antes.proveedor_id;
+    let venta_id = body.venta_id ?? antes.venta_id;
+    let compra_id = body.compra_id ?? antes.compra_id;
+    let beneficiario_nombre =
+      body.beneficiario_nombre ?? antes.beneficiario_nombre;
+    let observaciones = body.observaciones ?? antes.observaciones;
+
+    // 3) Reglas + inferencias (siempre via AppError)
+    if (!['recibido', 'emitido'].includes(tipo)) {
+      throw new AppError({
+        status: 400,
+        code: 'TIPO_INVALIDO',
+        message: 'Tipo inválido (recibido/emitido)',
+        tips: ['Elegí recibido o emitido.']
+      });
+    }
+
+    if (tipo === 'emitido') {
+      if (!chequera_id) {
+        throw new AppError({
+          status: 400,
+          code: 'CHEQUERA_REQUERIDA',
+          message: 'chequera_id es requerido para cheques emitidos',
+          tips: ['Seleccioná una chequera.'],
+          details: { field: 'chequera_id' }
+        });
+      }
+
+      // Lock mínimo en la chequera para inferir banco y mantener orden de locks
+      const chequera = await ChequeraModel.findByPk(chequera_id, {
+        include: [
+          {
+            model: BancoCuentaModel,
+            as: 'cuenta',
+            attributes: ['id', 'banco_id'],
+            include: [{ model: BancoModel, as: 'banco', attributes: ['id'] }]
+          }
+        ],
         transaction: t,
         lock: t.LOCK.UPDATE
       });
-      if (dup) throw new Error('Ya existe un cheque con ese banco y número');
+      if (!chequera) {
+        throw new AppError({
+          status: 404,
+          code: 'CHEQUERA_INEXISTENTE',
+          message: 'Chequera inexistente',
+          tips: [
+            'Actualizá la página y volvé a intentar.',
+            'Verificá que la chequera siga activa.'
+          ]
+        });
+      }
+
+      banco_id = chequera?.cuenta?.banco?.id ?? null;
+      if (!banco_id) {
+        throw new AppError({
+          status: 400,
+          code: 'BANCO_NO_INFERIDO',
+          message: 'No se pudo inferir el banco propio desde la chequera',
+          tips: ['Revisá la cuenta y banco configurados para esa chequera.']
+        });
+      }
+    } else {
+      // recibido
+      if (!banco_id) {
+        throw new AppError({
+          status: 400,
+          code: 'BANCO_REQUERIDO',
+          message: 'banco_id es requerido para cheques recibidos',
+          tips: ['Seleccioná el banco del cheque recibido.'],
+          details: { field: 'banco_id' }
+        });
+      }
+      // Si te pasan chequera_id en "recibido", podés ignorarlo o validarlo según negocio
+      // chequera_id = null;
     }
 
-    const [updated] = await ChequeModel.update(
-      {
-        tipo: body.tipo ?? antes.tipo,
-        canal: body.canal ?? antes.canal,
-        banco_id,
-        chequera_id: body.chequera_id ?? antes.chequera_id,
-        numero,
-        monto: body.monto ?? antes.monto,
-        fecha_emision: body.fecha_emision ?? antes.fecha_emision,
-        fecha_vencimiento: body.fecha_vencimiento ?? antes.fecha_vencimiento,
-        fecha_cobro_prevista:
-          body.fecha_cobro_prevista ?? antes.fecha_cobro_prevista,
-        cliente_id: body.cliente_id ?? antes.cliente_id,
-        proveedor_id: body.proveedor_id ?? antes.proveedor_id,
-        venta_id: body.venta_id ?? antes.venta_id,
-        compra_id: body.compra_id ?? antes.compra_id,
-        beneficiario_nombre:
-          body.beneficiario_nombre ?? antes.beneficiario_nombre,
-        observaciones: body.observaciones ?? antes.observaciones,
-        updated_by: usuario_log_id ?? antes.updated_by
-      },
-      { where: { id }, transaction: t }
-    );
+    // 4) UPDATE directo, confiando en UNIQUE (banco_id, numero); capturamos uniqueness en el catch externo
+    try {
+      const [updated] = await ChequeModel.update(
+        {
+          tipo,
+          canal,
+          banco_id,
+          chequera_id,
+          numero,
+          monto,
+          fecha_emision,
+          fecha_vencimiento,
+          fecha_cobro_prevista,
+          cliente_id,
+          proveedor_id,
+          venta_id,
+          compra_id,
+          beneficiario_nombre,
+          observaciones,
+          updated_by: usuario_log_id ?? antes.updated_by
+        },
+        { where: { id }, transaction: t }
+      );
+      if (updated !== 1) {
+        throw new AppError({
+          status: 500,
+          code: 'UPDATE_FALLIDO',
+          message: 'No se pudo actualizar el cheque',
+          tips: ['Reintentá la operación.']
+        });
+      }
+    } catch (e) {
+      // No respondemos acá: dejamos que el catch general mapee DUPLICATE/LOCK/etc con toHttpError
+      throw e;
+    }
 
-    if (updated !== 1) throw new Error('No se pudo actualizar el cheque');
-
-    // Recalcular proyección
+    // 5) Recalcular proyección
     const despues = await ChequeModel.findByPk(id, { transaction: t });
     if (despues.tipo === 'recibido') {
       if (despues.fecha_cobro_prevista) {
@@ -665,14 +877,16 @@ export const UR_Cheque_CTS = async (req, res) => {
       }
     }
 
+    // 6) Commit
     await t.commit();
 
+    // 7) Log best-effort
     try {
       await registrarLog(
         req,
         'cheques',
         'editar',
-        `actualizó el cheque #${antes.numero}`,
+        `actualizó el cheque #${antes.numero} → #${despues.numero} (${despues.tipo})`,
         usuario_log_id
       );
     } catch (logErr) {
@@ -681,22 +895,36 @@ export const UR_Cheque_CTS = async (req, res) => {
 
     const actualizado = await ChequeModel.findByPk(id);
     return res.json({
+      ok: true,
       message: 'Cheque actualizado correctamente',
       cheque: actualizado
     });
-  } catch (error) {
+  } catch (err) {
     try {
       await t.rollback();
     } catch {}
-    console.error('UR_Cheque_CTS:', error);
-    res.status(500).json({ mensajeError: error.message });
+    const httpErr = toHttpError(err); // mapea Duplicate, Validation, FK, Lock timeout, genéricos, etc.
+    console.error('UR_Cheque_CTS:', {
+      code: httpErr.code,
+      message: httpErr.message,
+      raw: err?.message
+    });
+    return res.status(httpErr.status).json({
+      ok: false,
+      code: httpErr.code,
+      mensajeError: httpErr.message,
+      tips: httpErr.tips,
+      details: httpErr.details
+    });
   }
 };
 
 /* =========================================================================
  * 5) Eliminar / Anular  DELETE /cheques/:id?forzar=true
- *    - Si tiene movimientos bancarios asociados => no eliminar
- *    - Si tiene movimientos de cheque => pide ?forzar para anular
+ *    - Si tiene movimientos bancarios => no eliminar (409)
+ *    - Si tiene movimientos de cheque => requiere ?forzar (409 con tips)
+ *    - Si ?forzar=true => ANULAR (estado='anulado') + borrar flujo
+ *    - Si no tiene dependencias => eliminación física
  * =======================================================================*/
 export const ER_Cheque_CTS = async (req, res) => {
   const id = Number(req.params.id);
@@ -705,41 +933,78 @@ export const ER_Cheque_CTS = async (req, res) => {
   const usuario_log_id =
     req.body?.usuario_log_id ?? req.query?.usuario_log_id ?? null;
 
+  if (!id || Number.isNaN(id)) {
+    return res.status(400).json({
+      ok: false,
+      code: 'ID_INVALIDO',
+      mensajeError: 'Id de cheque inválido',
+      tips: ['Refrescá la lista e intentá nuevamente.']
+    });
+  }
+
   const t = await db.transaction({
     isolationLevel: Transaction.ISOLATION_LEVELS.READ_COMMITTED
   });
+
   try {
+    // 1) Cargar cheque con lock para operación consistente
     const cheque = await ChequeModel.findByPk(id, {
       transaction: t,
       lock: t.LOCK.UPDATE
     });
-    if (!cheque)
-      return res.status(404).json({ mensajeError: 'Cheque no encontrado' });
+    if (!cheque) {
+      throw new AppError({
+        status: 404,
+        code: 'CHEQUE_NO_ENCONTRADO',
+        message: 'Cheque no encontrado',
+        tips: ['Actualizá la lista y volvé a intentar.']
+      });
+    }
 
-    const tieneMovBanc = await BancoMovimientoModel.count({
-      where: { referencia_tipo: 'cheque', referencia_id: id },
-      transaction: t
-    });
-    const cantMovs = await ChequeMovimientoModel.count({
-      where: { cheque_id: id },
-      transaction: t
-    });
+    // 2) Dependencias
+    const [tieneMovBanc, cantMovs] = await Promise.all([
+      BancoMovimientoModel.count({
+        where: { referencia_tipo: 'cheque', referencia_id: id },
+        transaction: t
+      }),
+      ChequeMovimientoModel.count({
+        where: { cheque_id: id },
+        transaction: t
+      })
+    ]);
 
+    // 3) Reglas
     if (tieneMovBanc > 0) {
-      return res.status(409).json({
-        mensajeError:
-          'No puede eliminar: el cheque tiene movimientos bancarios asociados'
+      throw new AppError({
+        status: 409,
+        code: 'TIENE_MOV_BANCARIOS',
+        message:
+          'No se puede eliminar: el cheque tiene movimientos bancarios asociados',
+        tips: [
+          'Revertí o eliminá los movimientos bancarios relacionados.',
+          'Como alternativa, podés anular el cheque.'
+        ],
+        details: { cheque_id: id }
       });
     }
 
     if (cantMovs > 1 && !forzado) {
-      return res.status(409).json({
-        mensajeError:
-          'El cheque tiene movimientos registrados. ¿Desea ANULARLO de todas formas?'
+      throw new AppError({
+        status: 409,
+        code: 'TIENE_MOV_CHEQUE',
+        message:
+          'El cheque tiene movimientos registrados. ¿Deseás ANULARLO de todas formas?',
+        tips: [
+          'Confirmá la operación marcando “forzar/anular”.',
+          'Revisá el historial del cheque antes de anular.'
+        ],
+        details: { cheque_id: id, sugerencia: 'pasar ?forzar=true' }
       });
     }
 
+    // 4) Ejecutar acción
     if (cantMovs > 1 && forzado) {
+      // ANULAR
       await ChequeModel.update(
         { estado: 'anulado', motivo_estado: 'Anulado por usuario' },
         { where: { id }, transaction: t }
@@ -757,6 +1022,7 @@ export const ER_Cheque_CTS = async (req, res) => {
       );
       await t.commit();
 
+      // Log best-effort
       try {
         await registrarLog(
           req,
@@ -766,7 +1032,11 @@ export const ER_Cheque_CTS = async (req, res) => {
           usuario_log_id
         );
       } catch {}
-      return res.json({ message: 'Cheque ANULADO (tenía movimientos).' });
+
+      return res.json({
+        ok: true,
+        message: 'Cheque ANULADO (tenía movimientos).'
+      });
     }
 
     // Sin dependencias => eliminación física
@@ -783,13 +1053,25 @@ export const ER_Cheque_CTS = async (req, res) => {
         usuario_log_id
       );
     } catch {}
-    return res.json({ message: 'Cheque eliminado correctamente.' });
-  } catch (error) {
+
+    return res.json({ ok: true, message: 'Cheque eliminado correctamente.' });
+  } catch (err) {
     try {
       await t.rollback();
     } catch {}
-    console.error('ER_Cheque_CTS:', error);
-    res.status(500).json({ mensajeError: error.message });
+    const httpErr = toHttpError(err); // mapea DUPLICATE/FK/LOCK/etc. + AppError propios
+    console.error('ER_Cheque_CTS:', {
+      code: httpErr.code,
+      message: httpErr.message,
+      raw: err?.message
+    });
+    return res.status(httpErr.status).json({
+      ok: false,
+      code: httpErr.code,
+      mensajeError: httpErr.message,
+      tips: httpErr.tips,
+      details: httpErr.details
+    });
   }
 };
 
@@ -830,11 +1112,9 @@ export const TR_Depositar_Cheque_CTS = async (req, res) => {
         cheque.estado
       )
     ) {
-      return res
-        .status(409)
-        .json({
-          mensajeError: `El cheque no puede pasar a DEPOSITADO desde estado "${cheque.estado}"`
-        });
+      return res.status(409).json({
+        mensajeError: `El cheque no puede pasar a DEPOSITADO desde estado "${cheque.estado}"`
+      });
     }
 
     const cuenta = await BancoCuentaModel.findByPk(banco_cuenta_id, {
@@ -926,22 +1206,18 @@ export const TR_Acreditar_Cheque_CTS = async (req, res) => {
         .status(400)
         .json({ mensajeError: 'Solo aplica a cheques recibidos' });
     if (cheque.estado !== 'depositado') {
-      return res
-        .status(409)
-        .json({
-          mensajeError: `El cheque debe estar DEPOSITADO (actual: ${cheque.estado})`
-        });
+      return res.status(409).json({
+        mensajeError: `El cheque debe estar DEPOSITADO (actual: ${cheque.estado})`
+      });
     }
 
     // Obtener cuenta para acreditar: del depósito previo o body
     let cuentaId = await getCuentaDepositoFromMov({ t, chequeId: id });
     if (!cuentaId && banco_cuenta_id) cuentaId = Number(banco_cuenta_id);
     if (!cuentaId)
-      return res
-        .status(400)
-        .json({
-          mensajeError: 'No se pudo determinar la cuenta de acreditación'
-        });
+      return res.status(400).json({
+        mensajeError: 'No se pudo determinar la cuenta de acreditación'
+      });
 
     const cuenta = await BancoCuentaModel.findByPk(cuentaId, {
       transaction: t
@@ -1031,11 +1307,9 @@ export const TR_Rechazar_Cheque_CTS = async (req, res) => {
         .status(400)
         .json({ mensajeError: 'Solo aplica a cheques recibidos' });
     if (cheque.estado !== 'depositado') {
-      return res
-        .status(409)
-        .json({
-          mensajeError: `El cheque debe estar DEPOSITADO (actual: ${cheque.estado})`
-        });
+      return res.status(409).json({
+        mensajeError: `El cheque debe estar DEPOSITADO (actual: ${cheque.estado})`
+      });
     }
 
     await ChequeModel.update(
@@ -1147,7 +1421,8 @@ export const TR_AplicarProveedor_Cheque_CTS = async (req, res) => {
       await deleteFlujoCheque({ t, chequeId: id });
     } else if (cheque.tipo === 'emitido') {
       const provId = Number(proveedor_id || cheque.proveedor_id || 0);
-      if (!provId) throw new Error('proveedor_id es requerido para cheques emitidos');
+      if (!provId)
+        throw new Error('proveedor_id es requerido para cheques emitidos');
 
       await ChequeModel.update(
         {
@@ -1191,12 +1466,13 @@ export const TR_AplicarProveedor_Cheque_CTS = async (req, res) => {
       message: 'Cheque aplicado a proveedor correctamente.'
     });
   } catch (error) {
-    try { await t.rollback(); } catch {}
+    try {
+      await t.rollback();
+    } catch {}
     console.error('TR_AplicarProveedor_Cheque_CTS:', error);
     return res.status(500).json({ mensajeError: error.message });
   }
 };
-
 
 /* =========================================================================
  * Transición: ENTREGAR  PATCH /cheques/:id/entregar
@@ -1347,11 +1623,9 @@ export const TR_Compensar_Cheque_CTS = async (req, res) => {
         .status(400)
         .json({ mensajeError: 'Solo aplica a cheques emitidos' });
     if (!['entregado'].includes(cheque.estado)) {
-      return res
-        .status(409)
-        .json({
-          mensajeError: `El cheque debe estar ENTREGADO (actual: ${cheque.estado})`
-        });
+      return res.status(409).json({
+        mensajeError: `El cheque debe estar ENTREGADO (actual: ${cheque.estado})`
+      });
     }
     const cuentaId = cheque.chequera?.banco_cuenta_id;
     if (!cuentaId)
@@ -1438,11 +1712,9 @@ export const TR_Anular_Cheque_CTS = async (req, res) => {
         ? ['registrado', 'en_cartera', 'aplicado_a_compra', 'endosado']
         : ['registrado', 'entregado'];
     if (!permitidos.includes(cheque.estado)) {
-      return res
-        .status(409)
-        .json({
-          mensajeError: `El cheque no puede ANULARSE desde "${cheque.estado}"`
-        });
+      return res.status(409).json({
+        mensajeError: `El cheque no puede ANULARSE desde "${cheque.estado}"`
+      });
     }
 
     await ChequeModel.update(
