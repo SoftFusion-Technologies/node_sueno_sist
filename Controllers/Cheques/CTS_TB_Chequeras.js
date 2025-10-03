@@ -20,18 +20,12 @@ import { BancoCuentaModel } from '../../Models/Bancos/MD_TB_BancoCuentas.js';
 import { ChequeraModel } from '../../Models/Cheques/MD_TB_Chequeras.js';
 import { ChequeModel } from '../../Models/Cheques/MD_TB_Cheques.js';
 import { registrarLog } from '../../Helpers/registrarLog.js';
+import {
+  validarRangoChequera,
+  sugerirRangoDisponible
+} from '../../Utils/chequeras.js';
 
-/* =========================================================================
- * Helpers de validación
- * =======================================================================*/
-const validarRangoChequera = (desde, hasta, proximo) => {
-  const d = BigInt(desde ?? 0);
-  const h = BigInt(hasta ?? 0);
-  const p = BigInt(proximo ?? 0);
-  if (d > h) throw new Error('nro_desde no puede ser mayor que nro_hasta');
-  if (p < d || p > h) throw new Error('proximo_nro fuera del rango definido');
-};
-
+import { AppError, toHttpError } from '../../Utils/httpErrors.js';
 const existeSuperposicion = async (
   banco_cuenta_id,
   nro_desde,
@@ -302,42 +296,120 @@ export const CR_Chequera_CTS = async (req, res) => {
     nro_hasta,
     proximo_nro, // opcional; si falta, se setea = nro_desde
     estado, // opcional; por defecto 'activa'
-    usuario_log_id
+    usuario_log_id,
+    auto // opcional; si true => aplica sugerencia automáticamente
   } = req.body || {};
 
   try {
+    // 1) Validar cuenta
     const cuenta = await BancoCuentaModel.findByPk(banco_cuenta_id, {
       include: [
         { model: BancoModel, as: 'banco', attributes: ['id', 'nombre'] }
       ]
     });
     if (!cuenta) {
-      return res
-        .status(400)
-        .json({ mensajeError: 'Cuenta bancaria inexistente' });
-    }
-
-    const prox = proximo_nro ?? nro_desde;
-    validarRangoChequera(nro_desde, nro_hasta, prox);
-
-    // Evitar superposición de rangos en la misma cuenta
-    const overlap = await existeSuperposicion(
-      banco_cuenta_id,
-      nro_desde,
-      nro_hasta
-    );
-    if (overlap) {
-      return res.status(409).json({
-        mensajeError:
-          'Existe otra chequera con rango que se superpone en esta cuenta bancaria'
+      throw new AppError({
+        status: 400,
+        code: 'CUENTA_INEXISTENTE',
+        message: 'Cuenta bancaria inexistente',
+        tips: ['Seleccioná una cuenta válida.'],
+        details: { field: 'banco_cuenta_id' }
       });
     }
 
+    // 2) Validar rango básico
+    const prox = proximo_nro ?? nro_desde;
+    validarRangoChequera(nro_desde, nro_hasta, prox);
+
+    // 3) Chequear superposición/sugerir
+    const len = Number(nro_hasta) - Number(nro_desde) + 1;
+
+    // ¿se superpone con alguna existente?
+    const solapa = await ChequeraModel.findOne({
+      where: {
+        banco_cuenta_id
+        // Solapa si: (nuevo.desde <= existente.hasta) && (nuevo.hasta >= existente.desde)
+        // Sequelize version simplificada usando literal ó reemplazar por Op
+      }
+      // Usamos literal por claridad (si tenés Op.between/between-like adaptalo):
+      // Nota: con Sequelize, conviene construir con [Op.and]/[Op.or]
+      // Para brevedad dejamos un literal seguro:
+      // *Asegurate de parametrizar si armás raw.*
+      // Aquí simplificamos consultando todas y chequeando en JS (robusto y claro):
+    });
+
+    // Para robustez: mejor traer todos y chequear en JS (menos errores por dialectos)
+    const existentes = await ChequeraModel.findAll({
+      where: { banco_cuenta_id },
+      attributes: ['nro_desde', 'nro_hasta'],
+      order: [['nro_desde', 'ASC']]
+    });
+
+    const d = Number(nro_desde),
+      h = Number(nro_hasta);
+    const haySolape = existentes.some(
+      (r) => d <= Number(r.nro_hasta) && h >= Number(r.nro_desde)
+    );
+
+    if (haySolape) {
+      // Generar sugerencia
+      const prefer = d; // intentemos respetar el inicio pedido si hubiera hueco ahí
+      const sug = await sugerirRangoDisponible(banco_cuenta_id, len, prefer);
+
+      // Si auto=true => aplicamos sugerencia y creamos
+      const debeAuto =
+        auto === true || auto === 1 || auto === '1' || auto === 'true';
+      if (!debeAuto) {
+        throw new AppError({
+          status: 409,
+          code: 'RANGO_SUPERPUESTO',
+          message:
+            'El rango solicitado se superpone con una chequera existente',
+          tips: [
+            `Usá el rango sugerido ${sug.nro_desde}–${sug.nro_hasta} para evitar superposición.`,
+            'O ajustá manualmente "desde/hasta" para que no se superpongan.'
+          ],
+          details: {
+            requested: { nro_desde: d, nro_hasta: h },
+            suggestion: { ...sug, proximo_nro: sug.nro_desde }
+          }
+        });
+      }
+
+      // auto: crear con sugerencia
+      const nuevaAuto = await ChequeraModel.create({
+        banco_cuenta_id,
+        descripcion: descripcion?.trim(),
+        nro_desde: sug.nro_desde,
+        nro_hasta: sug.nro_hasta,
+        proximo_nro: sug.nro_desde,
+        estado: estado || 'activa'
+      });
+
+      try {
+        await registrarLog(
+          req,
+          'chequeras',
+          'crear',
+          `creó la chequera "${nuevaAuto.descripcion}" en la cuenta "${cuenta.nombre_cuenta}" del banco "${cuenta.banco?.nombre}" (rango ${sug.nro_desde}-${sug.nro_hasta}, sugerido)`,
+          usuario_log_id
+        );
+      } catch {}
+
+      return res.json({
+        ok: true,
+        message: 'Chequera creada con rango sugerido',
+        chequera: nuevaAuto,
+        suggestionApplied: true
+      });
+    }
+
+    // 4) Crear normal si NO hay solape
     const nueva = await ChequeraModel.create({
       banco_cuenta_id,
       descripcion: descripcion?.trim(),
-      nro_desde,
-      nro_hasta,
+      nro_desde: d,
+      nro_hasta: h,
       proximo_nro: prox,
       estado: estado || 'activa'
     });
@@ -347,20 +419,30 @@ export const CR_Chequera_CTS = async (req, res) => {
         req,
         'chequeras',
         'crear',
-        `creó la chequera "${nueva.descripcion}" en la cuenta "${cuenta.nombre_cuenta}" del banco "${cuenta.banco?.nombre}" (rango ${nro_desde}-${nro_hasta})`,
+        `creó la chequera "${nueva.descripcion}" en la cuenta "${cuenta.nombre_cuenta}" del banco "${cuenta.banco?.nombre}" (rango ${d}-${h})`,
         usuario_log_id
       );
-    } catch (logErr) {
-      console.warn('registrarLog falló:', logErr?.message || logErr);
-    }
+    } catch {}
 
     return res.json({
+      ok: true,
       message: 'Chequera creada correctamente',
       chequera: nueva
     });
-  } catch (error) {
-    console.error('CR_Chequera_CTS:', error);
-    res.status(500).json({ mensajeError: error.message });
+  } catch (err) {
+    const httpErr = toHttpError(err);
+    console.error('CR_Chequera_CTS:', {
+      code: httpErr.code,
+      message: httpErr.message,
+      raw: err?.message
+    });
+    return res.status(httpErr.status).json({
+      ok: false,
+      code: httpErr.code,
+      mensajeError: httpErr.message,
+      tips: httpErr.tips,
+      details: httpErr.details
+    });
   }
 };
 
