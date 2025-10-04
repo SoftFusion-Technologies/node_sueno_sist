@@ -19,6 +19,8 @@ import { BancoModel } from '../../Models/Bancos/MD_TB_Bancos.js';
 import { BancoCuentaModel } from '../../Models/Bancos/MD_TB_BancoCuentas.js';
 import { registrarLog } from '../../Helpers/registrarLog.js';
 
+import { AppError, toHttpError } from '../../Utils/httpErrors.js';
+
 /* =========================================================================
  * 1) Obtener TODOS los bancos (+cantidad de cuentas)  GET /bancos
  *    - Retrocompat: si no pasan params -> devuelve array plano
@@ -166,24 +168,41 @@ export const OBR_Banco_CTS = async (req, res) => {
  * =======================================================================*/
 export const CR_Banco_CTS = async (req, res) => {
   const { nombre, cuit, alias, activo, usuario_log_id } = req.body || {};
+
   try {
-    // Validar unicidad por nombre
+    // Validaciones de negocio
+    if (!nombre?.trim()) {
+      throw new AppError({
+        status: 400,
+        code: 'NOMBRE_REQUERIDO',
+        message: 'El nombre del banco es obligatorio.',
+        tips: ['Completá el campo Nombre.'],
+        details: { field: 'nombre' }
+      });
+    }
+
+    // Unicidad por nombre (case-sensitive según collation; ajustar si querés)
     const existe = await BancoModel.findOne({
-      where: { nombre: nombre?.trim() }
+      where: { nombre: nombre.trim() }
     });
     if (existe) {
-      return res
-        .status(409)
-        .json({ mensajeError: 'Ya existe un banco con ese nombre' });
+      throw new AppError({
+        status: 409,
+        code: 'DUPLICATE',
+        message: 'Ya existe un banco con ese nombre.',
+        tips: ['Usá un nombre distinto o editá el banco existente.'],
+        details: { fields: ['nombre'] }
+      });
     }
 
     const nuevo = await BancoModel.create({
-      nombre: nombre?.trim(),
+      nombre: nombre.trim(),
       cuit: cuit?.trim() || null,
       alias: alias?.trim() || null,
       activo: activo === undefined ? true : Boolean(activo)
     });
 
+    // Log best-effort
     try {
       await registrarLog(
         req,
@@ -196,10 +215,23 @@ export const CR_Banco_CTS = async (req, res) => {
       console.warn('registrarLog falló:', logErr?.message || logErr);
     }
 
-    return res.json({ message: 'Banco creado correctamente', banco: nuevo });
-  } catch (error) {
-    console.error('CR_Banco_CTS:', error);
-    res.status(500).json({ mensajeError: error.message });
+    return res.json({
+      ok: true,
+      message: 'Banco creado correctamente',
+      banco: nuevo
+    });
+  } catch (err) {
+    const httpErr = toHttpError(err, {
+      message: 'No se pudo crear el banco.'
+    });
+    console.error('CR_Banco_CTS:', err);
+    return res.status(httpErr.status).json({
+      ok: false,
+      code: httpErr.code,
+      mensajeError: httpErr.message,
+      tips: httpErr.tips,
+      details: httpErr.details
+    });
   }
 };
 
@@ -214,50 +246,73 @@ export const UR_Banco_CTS = async (req, res) => {
   try {
     const antes = await BancoModel.findByPk(id);
     if (!antes) {
-      return res.status(404).json({ mensajeError: 'Banco no encontrado' });
-    }
-
-    // Si cambian nombre, validar unicidad
-    if (req.body.nombre && req.body.nombre.trim() !== antes.nombre) {
-      const ya = await BancoModel.findOne({
-        where: { nombre: req.body.nombre.trim(), id: { [Op.ne]: id } }
+      throw new AppError({
+        status: 404,
+        code: 'NOT_FOUND',
+        message: 'Banco no encontrado.'
       });
-      if (ya) {
-        return res
-          .status(409)
-          .json({ mensajeError: 'Ya existe un banco con ese nombre' });
+    }
+
+    // Validación de nombre (si viene)
+    if (Object.prototype.hasOwnProperty.call(req.body, 'nombre')) {
+      const nuevoNombre = req.body.nombre?.trim() || '';
+      if (!nuevoNombre) {
+        throw new AppError({
+          status: 400,
+          code: 'NOMBRE_REQUERIDO',
+          message: 'El nombre del banco es obligatorio.',
+          tips: ['Completá el campo Nombre.'],
+          details: { field: 'nombre' }
+        });
+      }
+      if (nuevoNombre !== antes.nombre) {
+        const ya = await BancoModel.findOne({
+          where: { nombre: nuevoNombre, id: { [Op.ne]: id } }
+        });
+        if (ya) {
+          throw new AppError({
+            status: 409,
+            code: 'DUPLICATE',
+            message: 'Ya existe un banco con ese nombre.',
+            tips: ['Usá un nombre distinto.'],
+            details: { fields: ['nombre'] }
+          });
+        }
       }
     }
 
-    const camposAuditar = ['nombre', 'cuit', 'alias', 'activo'];
-    const cambios = [];
-    for (const key of camposAuditar) {
-      if (
-        Object.prototype.hasOwnProperty.call(req.body, key) &&
-        req.body[key]?.toString() !== antes[key]?.toString()
-      ) {
-        cambios.push(`cambió "${key}" de "${antes[key]}" a "${req.body[key]}"`);
-      }
-    }
+    const payload = {
+      nombre:
+        req.body.nombre !== undefined ? req.body.nombre?.trim() : antes.nombre,
+      cuit: req.body.cuit !== undefined ? req.body.cuit?.trim() : antes.cuit,
+      alias:
+        req.body.alias !== undefined ? req.body.alias?.trim() : antes.alias,
+      activo:
+        req.body.activo === undefined ? antes.activo : Boolean(req.body.activo)
+    };
 
-    const [updated] = await BancoModel.update(
-      {
-        nombre: req.body.nombre?.trim() ?? antes.nombre,
-        cuit: req.body.cuit?.trim() ?? antes.cuit,
-        alias: req.body.alias?.trim() ?? antes.alias,
-        activo:
-          req.body.activo === undefined
-            ? antes.activo
-            : Boolean(req.body.activo)
-      },
-      { where: { id } }
-    );
-
+    const [updated] = await BancoModel.update(payload, { where: { id } });
     if (updated !== 1) {
-      return res.status(404).json({ mensajeError: 'Banco no encontrado' });
+      // Muy raro que llegue acá si antes existía, pero por seguridad
+      throw new AppError({
+        status: 404,
+        code: 'NOT_FOUND',
+        message: 'Banco no encontrado.'
+      });
     }
 
     const actualizado = await BancoModel.findByPk(id);
+
+    // Auditar cambios campo a campo
+    const camposAuditar = ['nombre', 'cuit', 'alias', 'activo'];
+    const cambios = [];
+    for (const key of camposAuditar) {
+      const oldV = String(antes[key] ?? '');
+      const newV = String(actualizado[key] ?? '');
+      if (oldV !== newV) {
+        cambios.push(`cambió "${key}" de "${oldV}" a "${newV}"`);
+      }
+    }
 
     try {
       const desc =
@@ -270,12 +325,22 @@ export const UR_Banco_CTS = async (req, res) => {
     }
 
     return res.json({
+      ok: true,
       message: 'Banco actualizado correctamente',
       banco: actualizado
     });
-  } catch (error) {
-    console.error('UR_Banco_CTS:', error);
-    res.status(500).json({ mensajeError: error.message });
+  } catch (err) {
+    const httpErr = toHttpError(err, {
+      message: 'No se pudo actualizar el banco.'
+    });
+    console.error('UR_Banco_CTS:', err);
+    return res.status(httpErr.status).json({
+      ok: false,
+      code: httpErr.code,
+      mensajeError: httpErr.message,
+      tips: httpErr.tips,
+      details: httpErr.details
+    });
   }
 };
 
@@ -301,17 +366,27 @@ export const ER_Banco_CTS = async (req, res) => {
   try {
     const banco = await BancoModel.findByPk(id);
     if (!banco) {
-      return res.status(404).json({ mensajeError: 'Banco no encontrado' });
+      throw new AppError({
+        status: 404,
+        code: 'NOT_FOUND',
+        message: 'Banco no encontrado.'
+      });
     }
 
     // Dependencias: cuentas por banco
     const cuentas = await BancoCuentaModel.count({ where: { banco_id: id } });
 
     if (cuentas > 0 && !forzado) {
-      return res.status(409).json({
-        mensajeError:
+      throw new AppError({
+        status: 409,
+        code: 'HAS_DEPENDENCIES',
+        message:
           'Este BANCO tiene cuentas asociadas. ¿Desea desactivarlo de todas formas?',
-        detalle: { cuentasAsociadas: cuentas }
+        tips: [
+          'Podés desactivarlo para ocultarlo de las listas.',
+          'Para eliminarlo definitivamente, primero migrá o eliminá sus cuentas/movimientos.'
+        ],
+        details: { cuentasAsociadas: cuentas }
       });
     }
 
@@ -332,8 +407,9 @@ export const ER_Banco_CTS = async (req, res) => {
       }
 
       return res.json({
+        ok: true,
         message:
-          'Banco desactivado (posee dependencias). Para eliminarlo definitivamente, primero migre o elimine sus cuentas y movimientos.'
+          'Banco desactivado (posee dependencias). Para eliminarlo definitivamente, primero migrá o eliminá sus cuentas y movimientos.'
       });
     }
 
@@ -352,9 +428,18 @@ export const ER_Banco_CTS = async (req, res) => {
       console.warn('registrarLog falló:', logErr?.message || logErr);
     }
 
-    return res.json({ message: 'Banco eliminado correctamente.' });
-  } catch (error) {
-    console.error('ER_Banco_CTS:', error);
-    res.status(500).json({ mensajeError: error.message });
+    return res.json({ ok: true, message: 'Banco eliminado correctamente.' });
+  } catch (err) {
+    const httpErr = toHttpError(err, {
+      message: 'No se pudo eliminar/desactivar el banco.'
+    });
+    console.error('ER_Banco_CTS:', err);
+    return res.status(httpErr.status).json({
+      ok: false,
+      code: httpErr.code,
+      mensajeError: httpErr.message,
+      tips: httpErr.tips,
+      details: httpErr.details
+    });
   }
 };
