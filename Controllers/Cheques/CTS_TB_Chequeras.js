@@ -449,6 +449,7 @@ export const CR_Chequera_CTS = async (req, res) => {
 /* =========================================================================
  * 4) Actualizar chequera  PUT/PATCH /chequeras/:id
  *    - Valida cambios de rango y superposición
+ *    - Errores normalizados
  * =======================================================================*/
 export const UR_Chequera_CTS = async (req, res) => {
   const { id } = req.params;
@@ -468,48 +469,61 @@ export const UR_Chequera_CTS = async (req, res) => {
       ]
     });
     if (!antes) {
-      return res.status(404).json({ mensajeError: 'Chequera no encontrada' });
+      throw new AppError({
+        status: 404,
+        code: 'NOT_FOUND',
+        message: 'Chequera no encontrada'
+      });
     }
 
-    // Valores "nuevos" tentativos
-    const banco_cuenta_id = body.banco_cuenta_id ?? antes.banco_cuenta_id;
-    const nro_desde = body.nro_desde ?? antes.nro_desde;
-    const nro_hasta = body.nro_hasta ?? antes.nro_hasta;
-    const proximo_nro = body.proximo_nro ?? antes.proximo_nro;
-    const descripcion = body.descripcion ?? antes.descripcion;
-    const estado = body.estado ?? antes.estado;
+    const next = {
+      banco_cuenta_id: body.banco_cuenta_id ?? antes.banco_cuenta_id,
+      descripcion: body.descripcion ?? antes.descripcion,
+      nro_desde: body.nro_desde ?? antes.nro_desde,
+      nro_hasta: body.nro_hasta ?? antes.nro_hasta,
+      proximo_nro: body.proximo_nro ?? antes.proximo_nro,
+      estado: body.estado ?? antes.estado
+    };
 
-    // Validaciones de rango y superposición
-    validarRangoChequera(nro_desde, nro_hasta, proximo_nro);
+    validarRangoChequera(next.nro_desde, next.nro_hasta, next.proximo_nro);
 
-    // Si cambia la cuenta o cambia el rango, chequear solapamiento
+    // Si cambia cuenta o rango -> verificar superposición
     if (
-      Number(banco_cuenta_id) !== Number(antes.banco_cuenta_id) ||
-      Number(nro_desde) !== Number(antes.nro_desde) ||
-      Number(nro_hasta) !== Number(antes.nro_hasta)
+      Number(next.banco_cuenta_id) !== Number(antes.banco_cuenta_id) ||
+      Number(next.nro_desde) !== Number(antes.nro_desde) ||
+      Number(next.nro_hasta) !== Number(antes.nro_hasta)
     ) {
-      const cuentaNueva = await BancoCuentaModel.findByPk(banco_cuenta_id);
-      if (!cuentaNueva) {
-        return res
-          .status(400)
-          .json({ mensajeError: 'Cuenta bancaria destino inexistente' });
+      const cta = await BancoCuentaModel.findByPk(next.banco_cuenta_id);
+      if (!cta) {
+        throw new AppError({
+          status: 400,
+          code: 'CUENTA_INEXISTENTE',
+          message: 'Cuenta bancaria destino inexistente',
+          details: { field: 'banco_cuenta_id', value: next.banco_cuenta_id }
+        });
       }
       const overlap = await existeSuperposicion(
-        banco_cuenta_id,
-        nro_desde,
-        nro_hasta,
+        next.banco_cuenta_id,
+        Number(next.nro_desde),
+        Number(next.nro_hasta),
         id
       );
       if (overlap) {
-        return res.status(409).json({
-          mensajeError:
-            'Existe otra chequera con rango que se superpone en esta cuenta bancaria'
+        throw new AppError({
+          status: 409,
+          code: 'RANGO_SUPERPUESTO',
+          message:
+            'El rango propuesto se superpone con otra chequera de la cuenta',
+          tips: [
+            'Ajustá "Desde / Hasta" para que no se superpongan.',
+            'Podés crear otra chequera usando el rango sugerido del asistente.'
+          ]
         });
       }
     }
 
-    // Auditar cambios
-    const camposAuditar = [
+    // Auditoría
+    const campos = [
       'banco_cuenta_id',
       'descripcion',
       'nro_desde',
@@ -518,31 +532,19 @@ export const UR_Chequera_CTS = async (req, res) => {
       'estado'
     ];
     const cambios = [];
-    for (const key of camposAuditar) {
-      if (
-        Object.prototype.hasOwnProperty.call(body, key) &&
-        (body[key]?.toString() ?? null) !== (antes[key]?.toString() ?? null)
-      ) {
-        cambios.push(
-          `cambió "${key}" de "${antes[key] ?? ''}" a "${body[key] ?? ''}"`
-        );
-      }
+    for (const k of campos) {
+      const prev = (antes[k]?.toString?.() ?? antes[k] ?? '') + '';
+      const val = (next[k]?.toString?.() ?? next[k] ?? '') + '';
+      if (prev !== val) cambios.push(`cambió "${k}" de "${prev}" a "${val}"`);
     }
 
-    const [updated] = await ChequeraModel.update(
-      {
-        banco_cuenta_id,
-        descripcion,
-        nro_desde,
-        nro_hasta,
-        proximo_nro,
-        estado
-      },
-      { where: { id } }
-    );
-
+    const [updated] = await ChequeraModel.update(next, { where: { id } });
     if (updated !== 1) {
-      return res.status(404).json({ mensajeError: 'Chequera no encontrada' });
+      throw new AppError({
+        status: 404,
+        code: 'NOT_FOUND',
+        message: 'Chequera no encontrada'
+      });
     }
 
     const actualizada = await ChequeraModel.findByPk(id, {
@@ -558,32 +560,42 @@ export const UR_Chequera_CTS = async (req, res) => {
     });
 
     try {
-      const desc =
-        cambios.length > 0
-          ? `actualizó la chequera "${antes.descripcion}" y ${cambios.join(
-              ', '
-            )}`
-          : `actualizó la chequera "${antes.descripcion}" sin cambios relevantes`;
+      const desc = cambios.length
+        ? `actualizó la chequera "${antes.descripcion || ''}" y ${cambios.join(
+            ', '
+          )}`
+        : `actualizó la chequera "${
+            antes.descripcion || ''
+          }" sin cambios relevantes`;
       await registrarLog(req, 'chequeras', 'editar', desc, usuario_log_id);
-    } catch (logErr) {
-      console.warn('registrarLog falló:', logErr?.message || logErr);
-    }
+    } catch {}
 
     return res.json({
       message: 'Chequera actualizada correctamente',
       chequera: actualizada
     });
-  } catch (error) {
-    console.error('UR_Chequera_CTS:', error);
-    res.status(500).json({ mensajeError: error.message });
+  } catch (err) {
+    const httpErr = toHttpError(err);
+    console.error('UR_Chequera_CTS:', {
+      code: httpErr.code,
+      message: httpErr.message,
+      raw: err?.message
+    });
+    return res.status(httpErr.status).json({
+      ok: false,
+      code: httpErr.code,
+      mensajeError: httpErr.message,
+      tips: httpErr.tips,
+      details: httpErr.details
+    });
   }
 };
 
 /* =========================================================================
  * 5) Anular/Eliminar chequera  DELETE /chequeras/:id?forzar=true
  *    Reglas:
- *      - Si hay cheques asociados => bloquear eliminación dura.
- *      - ?forzar=true => estado='anulada' (no cascada destructiva).
+ *      - Si hay cheques asociados => 409 (unless forzar) → estado='anulada'
+ *      - Sin dependencias => eliminación física
  * =======================================================================*/
 export const ER_Chequera_CTS = async (req, res) => {
   const id = Number(req.params.id);
@@ -592,11 +604,7 @@ export const ER_Chequera_CTS = async (req, res) => {
     body.usuario_log_id ?? req.query.usuario_log_id ?? null;
 
   const rawForzado = body.forzado ?? body.forzar ?? req.query.forzar ?? 'false';
-  const forzado =
-    rawForzado === true ||
-    rawForzado === 'true' ||
-    rawForzado === 1 ||
-    rawForzado === '1';
+  const forzado = [true, 'true', 1, '1'].includes(rawForzado);
 
   try {
     const chequera = await ChequeraModel.findByPk(id, {
@@ -611,7 +619,11 @@ export const ER_Chequera_CTS = async (req, res) => {
       ]
     });
     if (!chequera) {
-      return res.status(404).json({ mensajeError: 'Chequera no encontrada' });
+      throw new AppError({
+        status: 404,
+        code: 'NOT_FOUND',
+        message: 'Chequera no encontrada'
+      });
     }
 
     const countCheques = await ChequeModel.count({
@@ -619,10 +631,15 @@ export const ER_Chequera_CTS = async (req, res) => {
     });
 
     if (countCheques > 0 && !forzado) {
-      return res.status(409).json({
-        mensajeError:
-          'Esta CHEQUERA tiene cheques asociados. ¿Desea ANULARLA de todas formas?',
-        detalle: { chequesAsociados: countCheques }
+      throw new AppError({
+        status: 409,
+        code: 'HAS_CHEQUES',
+        message:
+          'Esta chequera tiene cheques asociados. ¿Desea ANULARLA de todas formas?',
+        tips: [
+          'Para eliminarla definitivamente, primero gestione o migre los cheques asociados.'
+        ],
+        details: { chequesAsociados: countCheques }
       });
     }
 
@@ -634,20 +651,21 @@ export const ER_Chequera_CTS = async (req, res) => {
           req,
           'chequeras',
           'editar',
-          `anuló la chequera "${chequera.descripcion}" (cheques asociados: ${countCheques})`,
+          `anuló la chequera "${
+            chequera.descripcion || ''
+          }" (cheques asociados: ${countCheques})`,
           usuario_log_id
         );
-      } catch (logErr) {
-        console.warn('registrarLog falló:', logErr?.message || logErr);
-      }
+      } catch {}
 
       return res.json({
         message:
-          'Chequera ANULADA (posee dependencias). Para eliminarla definitivamente, primero gestione sus cheques asociados.'
+          'Chequera ANULADA. Posee cheques asociados, por lo que no se elimina físicamente.',
+        chequera_id: id
       });
     }
 
-    // Sin dependencias => eliminación física
+    // Sin dependencias → eliminación física
     await ChequeraModel.destroy({ where: { id } });
 
     try {
@@ -655,16 +673,25 @@ export const ER_Chequera_CTS = async (req, res) => {
         req,
         'chequeras',
         'eliminar',
-        `eliminó la chequera "${chequera.descripcion}"`,
+        `eliminó la chequera "${chequera.descripcion || ''}"`,
         usuario_log_id
       );
-    } catch (logErr) {
-      console.warn('registrarLog falló:', logErr?.message || logErr);
-    }
+    } catch {}
 
     return res.json({ message: 'Chequera eliminada correctamente.' });
-  } catch (error) {
-    console.error('ER_Chequera_CTS:', error);
-    res.status(500).json({ mensajeError: error.message });
+  } catch (err) {
+    const httpErr = toHttpError(err);
+    console.error('ER_Chequera_CTS:', {
+      code: httpErr.code,
+      message: httpErr.message,
+      raw: err?.message
+    });
+    return res.status(httpErr.status).json({
+      ok: false,
+      code: httpErr.code,
+      mensajeError: httpErr.message,
+      tips: httpErr.tips,
+      details: httpErr.details
+    });
   }
 };
