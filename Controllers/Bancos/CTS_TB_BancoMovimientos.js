@@ -22,6 +22,16 @@ import { BancoMovimientoModel } from '../../Models/Bancos/MD_TB_BancoMovimientos
 import { ChequeModel } from '../../Models/Cheques/MD_TB_Cheques.js';
 import { registrarLog } from '../../Helpers/registrarLog.js';
 
+import { AppError, toHttpError } from '../../Utils/httpErrors.js';
+
+const REF_TIPOS = new Set([
+  'cheque',
+  'transferencia',
+  'deposito',
+  'ajuste',
+  'otro'
+]);
+const normStr = (s) => (typeof s === 'string' ? s.trim() : s);
 /* =========================================================================
  * 1) Listado  GET /banco-movimientos
  *    Filtros: q (descripcion), banco_id, banco_cuenta_id, fecha_from, fecha_to,
@@ -205,33 +215,78 @@ export const CR_BancoMovimiento_CTS = async (req, res) => {
   const { usuario_log_id } = body;
 
   try {
-    // Validar cuenta
+    if (!body.banco_cuenta_id) {
+      throw new AppError({
+        status: 400,
+        code: 'CUENTA_REQUIRED',
+        message: 'Debe seleccionar una cuenta bancaria',
+        details: { field: 'banco_cuenta_id' }
+      });
+    }
     const cuenta = await BancoCuentaModel.findByPk(body.banco_cuenta_id, {
       include: [
         { model: BancoModel, as: 'banco', attributes: ['id', 'nombre'] }
       ]
     });
-    if (!cuenta)
-      return res
-        .status(400)
-        .json({ mensajeError: 'Cuenta bancaria inexistente' });
+    if (!cuenta) {
+      throw new AppError({
+        status: 400,
+        code: 'CUENTA_INEXISTENTE',
+        message: 'Cuenta bancaria inexistente',
+        details: { field: 'banco_cuenta_id', value: body.banco_cuenta_id }
+      });
+    }
 
-    // Regla: o débito o crédito > 0
-    const deb = Number(body.debito || 0),
-      cre = Number(body.credito || 0);
+    const fecha = body.fecha || '';
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(fecha)) {
+      throw new AppError({
+        status: 400,
+        code: 'FECHA_INVALIDA',
+        message: 'La fecha es inválida (formato YYYY-MM-DD)',
+        details: { field: 'fecha', value: fecha }
+      });
+    }
+
+    const descripcion = normStr(body.descripcion);
+    if (!descripcion) {
+      throw new AppError({
+        status: 400,
+        code: 'DESCRIPCION_REQUIRED',
+        message: 'La descripción es obligatoria',
+        details: { field: 'descripcion' }
+      });
+    }
+
+    const deb = Number(body.debito || 0);
+    const cre = Number(body.credito || 0);
     if (!((deb > 0 && cre === 0) || (cre > 0 && deb === 0))) {
-      return res
-        .status(400)
-        .json({ mensajeError: 'Debe consignar solo débito o crédito (>0)' });
+      throw new AppError({
+        status: 400,
+        code: 'DEB_CRED_INVALID',
+        message: 'Debe consignar solo un importe: Débito o Crédito (> 0)',
+        tips: ['Si es egreso, usá Débito.', 'Si es ingreso, usá Crédito.'],
+        details: { fields: ['debito', 'credito'], debito: deb, credito: cre }
+      });
+    }
+
+    const rTipo = body.referencia_tipo || 'otro';
+    if (!REF_TIPOS.has(rTipo)) {
+      throw new AppError({
+        status: 400,
+        code: 'REFERENCIA_TIPO_INVALIDO',
+        message: 'Tipo de referencia inválido',
+        tips: ['Usá cheque, transferencia, deposito, ajuste u otro.'],
+        details: { field: 'referencia_tipo', value: rTipo }
+      });
     }
 
     const nuevo = await BancoMovimientoModel.create({
       banco_cuenta_id: body.banco_cuenta_id,
-      fecha: body.fecha,
-      descripcion: body.descripcion?.trim(),
+      fecha,
+      descripcion,
       debito: deb,
       credito: cre,
-      referencia_tipo: body.referencia_tipo || 'otro',
+      referencia_tipo: rTipo,
       referencia_id: body.referencia_id ?? null
     });
 
@@ -247,10 +302,20 @@ export const CR_BancoMovimiento_CTS = async (req, res) => {
       );
     } catch {}
 
-    res.json({ message: 'Movimiento creado correctamente', movimiento: nuevo });
-  } catch (error) {
-    console.error('CR_BancoMovimiento_CTS:', error);
-    res.status(500).json({ mensajeError: error.message });
+    return res.json({
+      message: 'Movimiento creado correctamente',
+      movimiento: nuevo
+    });
+  } catch (err) {
+    const httpErr = toHttpError(err);
+    console.error('CR_BancoMovimiento_CTS:', httpErr);
+    return res.status(httpErr.status).json({
+      ok: false,
+      code: httpErr.code,
+      mensajeError: httpErr.message,
+      tips: httpErr.tips,
+      details: httpErr.details
+    });
   }
 };
 
@@ -273,29 +338,66 @@ export const UR_BancoMovimiento_CTS = async (req, res) => {
       ]
     });
     if (!antes)
-      return res.status(404).json({ mensajeError: 'Movimiento no encontrado' });
+      throw new AppError({
+        status: 404,
+        code: 'NOT_FOUND',
+        message: 'Movimiento no encontrado'
+      });
 
-    // Si cambia cuenta, validar
-    if (
-      body.banco_cuenta_id &&
-      Number(body.banco_cuenta_id) !== Number(antes.banco_cuenta_id)
-    ) {
-      const cuenta = await BancoCuentaModel.findByPk(body.banco_cuenta_id);
-      if (!cuenta)
-        return res
-          .status(400)
-          .json({ mensajeError: 'Cuenta destino inexistente' });
+    let nextCuentaId = body.banco_cuenta_id ?? antes.banco_cuenta_id;
+    if (Number(nextCuentaId) !== Number(antes.banco_cuenta_id)) {
+      const cta = await BancoCuentaModel.findByPk(nextCuentaId);
+      if (!cta) {
+        throw new AppError({
+          status: 400,
+          code: 'CUENTA_INEXISTENTE',
+          message: 'Cuenta destino inexistente',
+          details: { field: 'banco_cuenta_id', value: nextCuentaId }
+        });
+      }
     }
 
-    // Validar débito/crédito
+    const nextFecha = body.fecha ?? antes.fecha;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(nextFecha)) {
+      throw new AppError({
+        status: 400,
+        code: 'FECHA_INVALIDA',
+        message: 'La fecha es inválida (formato YYYY-MM-DD)',
+        details: { field: 'fecha', value: nextFecha }
+      });
+    }
+
+    const nextDesc = normStr(body.descripcion) ?? antes.descripcion;
+    if (!nextDesc) {
+      throw new AppError({
+        status: 400,
+        code: 'DESCRIPCION_REQUIRED',
+        message: 'La descripción es obligatoria',
+        details: { field: 'descripcion' }
+      });
+    }
+
     const deb =
       body.debito !== undefined ? Number(body.debito) : Number(antes.debito);
     const cre =
       body.credito !== undefined ? Number(body.credito) : Number(antes.credito);
     if (!((deb > 0 && cre === 0) || (cre > 0 && deb === 0))) {
-      return res
-        .status(400)
-        .json({ mensajeError: 'Debe consignar solo débito o crédito (>0)' });
+      throw new AppError({
+        status: 400,
+        code: 'DEB_CRED_INVALID',
+        message: 'Debe consignar solo un importe: Débito o Crédito (> 0)',
+        details: { fields: ['debito', 'credito'], debito: deb, credito: cre }
+      });
+    }
+
+    const rTipo = body.referencia_tipo ?? antes.referencia_tipo;
+    if (!REF_TIPOS.has(rTipo)) {
+      throw new AppError({
+        status: 400,
+        code: 'REFERENCIA_TIPO_INVALIDO',
+        message: 'Tipo de referencia inválido',
+        details: { field: 'referencia_tipo', value: rTipo }
+      });
     }
 
     const cambios = [];
@@ -308,30 +410,49 @@ export const UR_BancoMovimiento_CTS = async (req, res) => {
       'referencia_tipo',
       'referencia_id'
     ]) {
-      if (
-        Object.prototype.hasOwnProperty.call(body, k) &&
-        (body[k]?.toString() ?? null) !== (antes[k]?.toString() ?? null)
-      ) {
-        cambios.push(
-          `cambió "${k}" de "${antes[k] ?? ''}" a "${body[k] ?? ''}"`
-        );
-      }
+      const prev = (antes[k]?.toString?.() ?? antes[k] ?? '') + '';
+      const val =
+        ({
+          banco_cuenta_id: nextCuentaId,
+          fecha: nextFecha,
+          descripcion: nextDesc,
+          debito: deb,
+          credito: cre,
+          referencia_tipo: rTipo,
+          referencia_id: body.referencia_id ?? antes.referencia_id
+        }[k]?.toString?.() ??
+          {
+            banco_cuenta_id: nextCuentaId,
+            fecha: nextFecha,
+            descripcion: nextDesc,
+            debito: deb,
+            credito: cre,
+            referencia_tipo: rTipo,
+            referencia_id: body.referencia_id ?? antes.referencia_id
+          }[k] ??
+          '') + '';
+      if (prev !== val) cambios.push(`cambió "${k}" de "${prev}" a "${val}"`);
     }
 
     const [updated] = await BancoMovimientoModel.update(
       {
-        banco_cuenta_id: body.banco_cuenta_id ?? antes.banco_cuenta_id,
-        fecha: body.fecha ?? antes.fecha,
-        descripcion: body.descripcion?.trim() ?? antes.descripcion,
+        banco_cuenta_id: nextCuentaId,
+        fecha: nextFecha,
+        descripcion: nextDesc,
         debito: deb,
         credito: cre,
-        referencia_tipo: body.referencia_tipo ?? antes.referencia_tipo,
+        referencia_tipo: rTipo,
         referencia_id: body.referencia_id ?? antes.referencia_id
       },
       { where: { id } }
     );
+
     if (updated !== 1)
-      return res.status(404).json({ mensajeError: 'Movimiento no encontrado' });
+      throw new AppError({
+        status: 404,
+        code: 'NOT_FOUND',
+        message: 'Movimiento no encontrado'
+      });
 
     const actualizado = await BancoMovimientoModel.findByPk(id);
 
@@ -347,15 +468,23 @@ export const UR_BancoMovimiento_CTS = async (req, res) => {
       );
     } catch {}
 
-    res.json({
+    return res.json({
       message: 'Movimiento actualizado correctamente',
       movimiento: actualizado
     });
-  } catch (error) {
-    console.error('UR_BancoMovimiento_CTS:', error);
-    res.status(500).json({ mensajeError: error.message });
+  } catch (err) {
+    const httpErr = toHttpError(err);
+    console.error('UR_BancoMovimiento_CTS:', httpErr);
+    return res.status(httpErr.status).json({
+      ok: false,
+      code: httpErr.code,
+      mensajeError: httpErr.message,
+      tips: httpErr.tips,
+      details: httpErr.details
+    });
   }
 };
+
 
 /* =========================================================================
  * 5) Eliminar  DELETE /banco-movimientos/:id?forzar=true
@@ -371,15 +500,27 @@ export const ER_BancoMovimiento_CTS = async (req, res) => {
   try {
     const mov = await BancoMovimientoModel.findByPk(id);
     if (!mov)
-      return res.status(404).json({ mensajeError: 'Movimiento no encontrado' });
+      throw new AppError({
+        status: 404,
+        code: 'NOT_FOUND',
+        message: 'Movimiento no encontrado'
+      });
 
     if (mov.referencia_tipo === 'cheque' && !forzado) {
-      return res
-        .status(409)
-        .json({
-          mensajeError:
-            'Movimiento vinculado a CHEQUE. ¿Desea eliminarlo de todas formas?'
-        });
+      throw new AppError({
+        status: 409,
+        code: 'CHEQUE_LINKED',
+        message:
+          'Movimiento vinculado a CHEQUE. ¿Desea eliminarlo de todas formas?',
+        tips: [
+          'Si eliminás, se pierde el asiento de este cheque en la cuenta.',
+          'Como alternativa, dejalo y registrá un contramovimiento.'
+        ],
+        details: {
+          referencia_tipo: mov.referencia_tipo,
+          referencia_id: mov.referencia_id
+        }
+      });
     }
 
     await BancoMovimientoModel.destroy({ where: { id } });
@@ -394,10 +535,17 @@ export const ER_BancoMovimiento_CTS = async (req, res) => {
       );
     } catch {}
 
-    res.json({ message: 'Movimiento eliminado correctamente.' });
-  } catch (error) {
-    console.error('ER_BancoMovimiento_CTS:', error);
-    res.status(500).json({ mensajeError: error.message });
+    return res.json({ message: 'Movimiento eliminado correctamente.' });
+  } catch (err) {
+    const httpErr = toHttpError(err);
+    console.error('ER_BancoMovimiento_CTS:', httpErr);
+    return res.status(httpErr.status).json({
+      ok: false,
+      code: httpErr.code,
+      mensajeError: httpErr.message,
+      tips: httpErr.tips,
+      details: httpErr.details
+    });
   }
 };
 
