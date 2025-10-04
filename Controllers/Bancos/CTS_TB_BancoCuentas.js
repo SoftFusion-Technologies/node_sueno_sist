@@ -20,6 +20,17 @@ import { BancoCuentaModel } from '../../Models/Bancos/MD_TB_BancoCuentas.js';
 import { ChequeraModel } from '../../Models/Cheques/MD_TB_Chequeras.js';
 import { BancoMovimientoModel } from '../../Models/Bancos/MD_TB_BancoMovimientos.js';
 import { registrarLog } from '../../Helpers/registrarLog.js';
+import { AppError, toHttpError } from '../../Utils/httpErrors.js';
+
+/* Pequeños helpers locales (evitamos dependencias externas) */
+const MONEDAS = new Set(['ARS', 'USD', 'EUR', 'OTRA']);
+const normStr = (s) => (typeof s === 'string' ? s.trim() : s);
+const normUpper = (s) => (typeof s === 'string' ? s.trim().toUpperCase() : s);
+
+// CBU Argentina: suelen ser 22 dígitos (no hacemos validación bancaria completa aquí)
+const isLikelyCBU = (s) => /^\d{22}$/.test(s || '');
+// Alias CBU: letras/números/._- (sin espacios), 6–20 aprox. (tolerante)
+const isLikelyAlias = (s) => /^[A-Za-z0-9._-]{4,60}$/.test(s || '');
 
 /* =========================================================================
  * 1) Obtener TODAS las cuentas bancarias  GET /banco-cuentas
@@ -252,7 +263,7 @@ export const CR_BancoCuenta_CTS = async (req, res) => {
   const {
     banco_id,
     nombre_cuenta,
-    moneda,
+    moneda = 'ARS',
     numero_cuenta,
     cbu,
     alias_cbu,
@@ -261,35 +272,98 @@ export const CR_BancoCuenta_CTS = async (req, res) => {
   } = req.body || {};
 
   try {
-    // Validar banco
+    // 1) Validaciones de entrada (claras y accionables)
+    if (!banco_id) {
+      throw new AppError({
+        status: 400,
+        code: 'BANCO_REQUIRED',
+        message: 'Debe seleccionar un banco',
+        tips: ['Elegí un banco de la lista.'],
+        details: { field: 'banco_id' }
+      });
+    }
+    if (!nombre_cuenta || !normStr(nombre_cuenta)) {
+      throw new AppError({
+        status: 400,
+        code: 'NOMBRE_REQUIRED',
+        message: 'El nombre/titular de la cuenta es obligatorio',
+        tips: ['Completá el campo Nombre/Titular.'],
+        details: { field: 'nombre_cuenta' }
+      });
+    }
+    const monedaOk = MONEDAS.has(String(moneda).toUpperCase());
+    if (!monedaOk) {
+      throw new AppError({
+        status: 400,
+        code: 'MONEDA_INVALIDA',
+        message: 'La moneda indicada no es válida',
+        tips: ['Usá ARS, USD, EUR u OTRA.'],
+        details: { field: 'moneda', value: moneda }
+      });
+    }
+    if (cbu && !isLikelyCBU(cbu)) {
+      throw new AppError({
+        status: 400,
+        code: 'CBU_INVALIDO',
+        message: 'El CBU parece inválido',
+        tips: ['Debe tener 22 dígitos sin espacios.'],
+        details: { field: 'cbu' }
+      });
+    }
+    if (alias_cbu && !isLikelyAlias(alias_cbu)) {
+      throw new AppError({
+        status: 400,
+        code: 'ALIAS_INVALIDO',
+        message: 'El alias CBU parece inválido',
+        tips: [
+          'Usá letras/números/puntos/guiones (sin espacios).',
+          'Entre 4 y 60 caracteres.'
+        ],
+        details: { field: 'alias_cbu' }
+      });
+    }
+
+    // 2) Banco existente
     const banco = await BancoModel.findByPk(banco_id);
     if (!banco) {
-      return res.status(400).json({ mensajeError: 'Banco inexistente' });
+      throw new AppError({
+        status: 400,
+        code: 'BANCO_INEXISTENTE',
+        message: 'Banco inexistente',
+        tips: ['Seleccioná un banco válido de la lista.'],
+        details: { field: 'banco_id' }
+      });
     }
 
-    // Soft uniqueness: mismo banco + mismo nombre_cuenta
+    // 3) Soft uniqueness: mismo banco + mismo nombre_cuenta
     const dup = await BancoCuentaModel.findOne({
-      where: { banco_id, nombre_cuenta: nombre_cuenta?.trim() }
+      where: { banco_id, nombre_cuenta: normStr(nombre_cuenta) }
     });
     if (dup) {
-      return res
-        .status(409)
-        .json({
-          mensajeError: 'Ya existe una cuenta con ese nombre en este banco'
-        });
+      throw new AppError({
+        status: 409,
+        code: 'DUPLICATE',
+        message: 'Ya existe una cuenta con ese nombre en este banco',
+        tips: [
+          'Usá un nombre diferente.',
+          'Si es la misma, verificá antes de crear un duplicado.'
+        ],
+        details: { fields: ['banco_id', 'nombre_cuenta'] }
+      });
     }
 
+    // 4) Alta
     const nueva = await BancoCuentaModel.create({
       banco_id,
-      nombre_cuenta: nombre_cuenta?.trim(),
-      moneda: moneda || 'ARS',
-      numero_cuenta: numero_cuenta?.trim() || null,
-      cbu: cbu?.trim() || null,
-      alias_cbu: alias_cbu?.trim() || null,
+      nombre_cuenta: normStr(nombre_cuenta),
+      moneda: String(moneda).toUpperCase(),
+      numero_cuenta: normStr(numero_cuenta) || null,
+      cbu: normStr(cbu) || null,
+      alias_cbu: normUpper(alias_cbu) || null,
       activo: activo === undefined ? true : Boolean(activo)
     });
 
-    // Log no bloqueante
+    // 5) Log best-effort
     try {
       await registrarLog(
         req,
@@ -303,16 +377,31 @@ export const CR_BancoCuenta_CTS = async (req, res) => {
     }
 
     return res.json({ message: 'Cuenta creada correctamente', cuenta: nueva });
-  } catch (error) {
-    console.error('CR_BancoCuenta_CTS:', error);
-    res.status(500).json({ mensajeError: error.message });
+  } catch (err) {
+    const httpErr = toHttpError(err);
+    console.error('CR_BancoCuenta_CTS:', {
+      code: httpErr.code,
+      message: httpErr.message,
+      raw: err?.message
+    });
+    return res.status(httpErr.status).json({
+      ok: false,
+      code: httpErr.code,
+      mensajeError: httpErr.message,
+      tips: httpErr.tips,
+      details: httpErr.details
+    });
   }
 };
+
 
 /* =========================================================================
  * 4) Actualizar cuenta bancaria  PUT/PATCH /banco-cuentas/:id
  *    - Permite cambiar banco_id (valida existencia)
- *    - Audita cambios campo a campo
+ *    - Soft uniqueness (banco_id + nombre_cuenta)
+ *    - Valida moneda/CBU/Alias
+ *    - Audita cambios
+ *    - Errores normalizados
  * =======================================================================*/
 export const UR_BancoCuenta_CTS = async (req, res) => {
   const { id } = req.params;
@@ -321,66 +410,111 @@ export const UR_BancoCuenta_CTS = async (req, res) => {
 
   try {
     const antes = await BancoCuentaModel.findByPk(id, {
-      include: [
-        { model: BancoModel, as: 'banco', attributes: ['id', 'nombre'] }
-      ]
+      include: [{ model: BancoModel, as: 'banco', attributes: ['id', 'nombre'] }]
     });
     if (!antes) {
-      return res
-        .status(404)
-        .json({ mensajeError: 'Cuenta bancaria no encontrada' });
+      throw new AppError({
+        status: 404,
+        code: 'NOT_FOUND',
+        message: 'Cuenta bancaria no encontrada'
+      });
     }
 
-    // Si cambian de banco, validar
-    let nuevoBanco = antes.banco;
+    // Campos candidatos (con fallback a valores actuales)
+    const next = {
+      banco_id: body.banco_id ?? antes.banco_id,
+      nombre_cuenta: normStr(body.nombre_cuenta) ?? antes.nombre_cuenta,
+      moneda: (body.moneda ?? antes.moneda)?.toString().toUpperCase(),
+      numero_cuenta: normStr(body.numero_cuenta) ?? antes.numero_cuenta,
+      cbu: normStr(body.cbu) ?? antes.cbu,
+      alias_cbu: normUpper(body.alias_cbu) ?? antes.alias_cbu,
+      activo:
+        body.activo === undefined ? antes.activo : Boolean(body.activo)
+    };
+
+    // Validaciones
+    if (!next.nombre_cuenta) {
+      throw new AppError({
+        status: 400,
+        code: 'NOMBRE_REQUIRED',
+        message: 'El nombre/titular de la cuenta es obligatorio',
+        tips: ['Completá el campo Nombre/Titular.'],
+        details: { field: 'nombre_cuenta' }
+      });
+    }
+    if (!MONEDAS.has(next.moneda)) {
+      throw new AppError({
+        status: 400,
+        code: 'MONEDA_INVALIDA',
+        message: 'La moneda indicada no es válida',
+        tips: ['Usá ARS, USD, EUR u OTRA.'],
+        details: { field: 'moneda', value: next.moneda }
+      });
+    }
+    if (next.cbu && !isLikelyCBU(next.cbu)) {
+      throw new AppError({
+        status: 400,
+        code: 'CBU_INVALIDO',
+        message: 'El CBU parece inválido',
+        tips: ['Debe tener 22 dígitos sin espacios.'],
+        details: { field: 'cbu' }
+      });
+    }
+    if (next.alias_cbu && !isLikelyAlias(next.alias_cbu)) {
+      throw new AppError({
+        status: 400,
+        code: 'ALIAS_INVALIDO',
+        message: 'El alias CBU parece inválido',
+        tips: [
+          'Usá letras/números/puntos/guiones (sin espacios).',
+          'Entre 4 y 60 caracteres.'
+        ],
+        details: { field: 'alias_cbu' }
+      });
+    }
+
+    // Validar banco si cambia
+    let bancoDestino = antes.banco;
+    if (Number(next.banco_id) !== Number(antes.banco_id)) {
+      bancoDestino = await BancoModel.findByPk(next.banco_id);
+      if (!bancoDestino) {
+        throw new AppError({
+          status: 400,
+          code: 'BANCO_INEXISTENTE',
+          message: 'Banco destino inexistente',
+          tips: ['Seleccioná un banco válido de la lista.'],
+          details: { field: 'banco_id' }
+        });
+      }
+    }
+
+    // Soft uniqueness: (banco_id, nombre_cuenta) distinto del actual
     if (
-      body.banco_id !== undefined &&
-      Number(body.banco_id) !== Number(antes.banco_id)
+      Number(next.banco_id) !== Number(antes.banco_id) ||
+      next.nombre_cuenta !== antes.nombre_cuenta
     ) {
-      nuevoBanco = await BancoModel.findByPk(body.banco_id);
-      if (!nuevoBanco) {
-        return res
-          .status(400)
-          .json({ mensajeError: 'Banco destino inexistente' });
-      }
-
-      // Soft uniqueness: mismo banco + nombre_cuenta
       const dup = await BancoCuentaModel.findOne({
         where: {
-          banco_id: body.banco_id,
-          nombre_cuenta: (body.nombre_cuenta ?? antes.nombre_cuenta).trim(),
+          banco_id: next.banco_id,
+          nombre_cuenta: next.nombre_cuenta,
           id: { [Op.ne]: id }
         }
       });
       if (dup) {
-        return res
-          .status(409)
-          .json({
-            mensajeError:
-              'Ya existe una cuenta con ese nombre en el banco destino'
-          });
-      }
-    } else if (
-      body.nombre_cuenta &&
-      body.nombre_cuenta.trim() !== antes.nombre_cuenta
-    ) {
-      // Cambia solo el nombre: evitar duplicado en el mismo banco
-      const dup = await BancoCuentaModel.findOne({
-        where: {
-          banco_id: antes.banco_id,
-          nombre_cuenta: body.nombre_cuenta.trim(),
-          id: { [Op.ne]: id }
-        }
-      });
-      if (dup) {
-        return res
-          .status(409)
-          .json({
-            mensajeError: 'Ya existe una cuenta con ese nombre en este banco'
-          });
+        throw new AppError({
+          status: 409,
+          code: 'DUPLICATE',
+          message:
+            Number(next.banco_id) !== Number(antes.banco_id)
+              ? 'Ya existe una cuenta con ese nombre en el banco destino'
+              : 'Ya existe una cuenta con ese nombre en este banco',
+          tips: ['Elegí un nombre diferente o verificá duplicados.'],
+          details: { fields: ['banco_id', 'nombre_cuenta'] }
+        });
       }
     }
 
+    // Auditoría de cambios
     const camposAuditar = [
       'banco_id',
       'nombre_cuenta',
@@ -392,48 +526,32 @@ export const UR_BancoCuenta_CTS = async (req, res) => {
     ];
     const cambios = [];
     for (const key of camposAuditar) {
-      if (
-        Object.prototype.hasOwnProperty.call(body, key) &&
-        (body[key]?.toString() ?? null) !== (antes[key]?.toString() ?? null)
-      ) {
-        cambios.push(
-          `cambió "${key}" de "${antes[key] ?? ''}" a "${body[key] ?? ''}"`
-        );
+      const prev = (antes[key]?.toString?.() ?? antes[key] ?? '') + '';
+      const val = (next[key]?.toString?.() ?? next[key] ?? '') + '';
+      if (prev !== val) {
+        cambios.push(`cambió "${key}" de "${prev}" a "${val}"`);
       }
     }
 
-    const [updated] = await BancoCuentaModel.update(
-      {
-        banco_id: body.banco_id ?? antes.banco_id,
-        nombre_cuenta: body.nombre_cuenta?.trim() ?? antes.nombre_cuenta,
-        moneda: body.moneda ?? antes.moneda,
-        numero_cuenta: body.numero_cuenta?.trim() ?? antes.numero_cuenta,
-        cbu: body.cbu?.trim() ?? antes.cbu,
-        alias_cbu: body.alias_cbu?.trim() ?? antes.alias_cbu,
-        activo: body.activo === undefined ? antes.activo : Boolean(body.activo)
-      },
-      { where: { id } }
-    );
-
+    // Update
+    const [updated] = await BancoCuentaModel.update(next, { where: { id } });
     if (updated !== 1) {
-      return res
-        .status(404)
-        .json({ mensajeError: 'Cuenta bancaria no encontrada' });
+      throw new AppError({
+        status: 404,
+        code: 'NOT_FOUND',
+        message: 'Cuenta bancaria no encontrada'
+      });
     }
 
     const actualizada = await BancoCuentaModel.findByPk(id, {
-      include: [
-        { model: BancoModel, as: 'banco', attributes: ['id', 'nombre'] }
-      ]
+      include: [{ model: BancoModel, as: 'banco', attributes: ['id', 'nombre'] }]
     });
 
-    // Log no bloqueante
+    // Log best-effort
     try {
       const desc =
         cambios.length > 0
-          ? `actualizó la cuenta "${antes.nombre_cuenta}" y ${cambios.join(
-              ', '
-            )}`
+          ? `actualizó la cuenta "${antes.nombre_cuenta}" y ${cambios.join(', ')}`
           : `actualizó la cuenta "${antes.nombre_cuenta}" sin cambios relevantes`;
       await registrarLog(req, 'banco_cuentas', 'editar', desc, usuario_log_id);
     } catch (logErr) {
@@ -444,17 +562,33 @@ export const UR_BancoCuenta_CTS = async (req, res) => {
       message: 'Cuenta bancaria actualizada correctamente',
       cuenta: actualizada
     });
-  } catch (error) {
-    console.error('UR_BancoCuenta_CTS:', error);
-    res.status(500).json({ mensajeError: error.message });
+  } catch (err) {
+    const httpErr = toHttpError(err);
+    console.error('UR_BancoCuenta_CTS:', {
+      code: httpErr.code,
+      message: httpErr.message,
+      raw: err?.message
+    });
+    return res.status(httpErr.status).json({
+      ok: false,
+      code: httpErr.code,
+      mensajeError: httpErr.message,
+      tips: httpErr.tips,
+      details: httpErr.details
+    });
   }
 };
 
 /* =========================================================================
  * 5) Eliminar/Desactivar cuenta bancaria  DELETE /banco-cuentas/:id?forzar=true
  *    Reglas:
- *      - Si hay chequeras o movimientos => bloquear eliminación dura.
- *      - ?forzar=true => marcar inactiva (activo=0).
+ *      - Si hay movimientos => JAMÁS eliminar físicamente (aunque forzar).
+ *        * Si ?forzar=true => desactivar (activo=0) y devolver mensaje.
+ *        * Si ?forzar=false => 409 con advertencia y detalles.
+ *      - Si no hay movimientos pero hay chequeras => misma lógica:
+ *        * ?forzar=true => desactivar
+ *        * ?forzar=false => 409
+ *      - Si no hay dependencias => eliminación física.
  * =======================================================================*/
 export const ER_BancoCuenta_CTS = async (req, res) => {
   const id = Number(req.params.id);
@@ -471,35 +605,39 @@ export const ER_BancoCuenta_CTS = async (req, res) => {
 
   try {
     const cuenta = await BancoCuentaModel.findByPk(id, {
-      include: [
-        { model: BancoModel, as: 'banco', attributes: ['id', 'nombre'] }
-      ]
+      include: [{ model: BancoModel, as: 'banco', attributes: ['id', 'nombre'] }]
     });
     if (!cuenta) {
-      return res
-        .status(404)
-        .json({ mensajeError: 'Cuenta bancaria no encontrada' });
+      throw new AppError({
+        status: 404,
+        code: 'NOT_FOUND',
+        message: 'Cuenta bancaria no encontrada'
+      });
     }
 
+    // Contar dependencias
     const [cantCheq, cantMov] = await Promise.all([
       ChequeraModel.count({ where: { banco_cuenta_id: id } }),
       BancoMovimientoModel.count({ where: { banco_cuenta_id: id } })
     ]);
 
-    if ((cantCheq > 0 || cantMov > 0) && !forzado) {
-      const detalles = [];
-      if (cantCheq > 0) detalles.push('tiene chequeras asociadas');
-      if (cantMov > 0) detalles.push('posee movimientos bancarios');
-      return res.status(409).json({
-        mensajeError: `Esta CUENTA ${detalles.join(
-          ' y '
-        )}. ¿Desea desactivarla de todas formas?`,
-        detalle: { chequerasAsociadas: cantCheq, movimientosAsociados: cantMov }
-      });
-    }
+    // 1) Si hay MOVIMIENTOS: NUNCA permitimos eliminación física
+    if (cantMov > 0) {
+      if (!forzado) {
+        throw new AppError({
+          status: 409,
+          code: 'HAS_MOVEMENTS',
+          message:
+            'Esta cuenta posee movimientos bancarios. ¿Desea desactivarla de todas formas?',
+          tips: [
+            'Para eliminar definitivamente, primero migre o elimine sus movimientos (si su negocio lo permite).',
+            'Como alternativa inmediata, desactive la cuenta para que no se use más.'
+          ],
+          details: { movimientosAsociados: cantMov, chequerasAsociadas: cantCheq }
+        });
+      }
 
-    if (cantCheq > 0 || cantMov > 0) {
-      // Desactivar (no borrar en cascada)
+      // forzado=true => desactivar
       await BancoCuentaModel.update({ activo: false }, { where: { id } });
 
       try {
@@ -507,7 +645,7 @@ export const ER_BancoCuenta_CTS = async (req, res) => {
           req,
           'banco_cuentas',
           'editar',
-          `desactivó la cuenta "${cuenta.nombre_cuenta}" del banco "${cuenta.banco?.nombre}" (chequeras: ${cantCheq}, movimientos: ${cantMov})`,
+          `desactivó la cuenta "${cuenta.nombre_cuenta}" del banco "${cuenta.banco?.nombre}" (movimientos: ${cantMov}, chequeras: ${cantCheq})`,
           usuario_log_id
         );
       } catch (logErr) {
@@ -516,11 +654,50 @@ export const ER_BancoCuenta_CTS = async (req, res) => {
 
       return res.json({
         message:
-          'Cuenta desactivada (posee dependencias). Para eliminarla definitivamente, primero migre/borre chequeras y movimientos.'
+          'Cuenta desactivada. Tiene movimientos asociados, por lo que no puede eliminarse físicamente.',
+        cuenta_id: id
       });
     }
 
-    // Sin dependencias => eliminación física
+    // 2) Sin movimientos pero con CHEQUERAS: tampoco eliminación dura sin forzar
+    if (cantCheq > 0) {
+      if (!forzado) {
+        throw new AppError({
+          status: 409,
+          code: 'HAS_CHEQUERAS',
+          message:
+            'Esta cuenta tiene chequeras asociadas. ¿Desea desactivarla de todas formas?',
+          tips: [
+            'Para eliminar definitivamente, primero migre o elimine sus chequeras vinculadas.',
+            'Como alternativa inmediata, desactive la cuenta para bloquear su uso.'
+          ],
+          details: { chequerasAsociadas: cantCheq }
+        });
+      }
+
+      // forzado=true => desactivar
+      await BancoCuentaModel.update({ activo: false }, { where: { id } });
+
+      try {
+        await registrarLog(
+          req,
+          'banco_cuentas',
+          'editar',
+          `desactivó la cuenta "${cuenta.nombre_cuenta}" del banco "${cuenta.banco?.nombre}" (chequeras: ${cantCheq})`,
+          usuario_log_id
+        );
+      } catch (logErr) {
+        console.warn('registrarLog falló:', logErr?.message || logErr);
+      }
+
+      return res.json({
+        message:
+          'Cuenta desactivada. Posee chequeras asociadas, por lo que no se elimina físicamente.',
+        cuenta_id: id
+      });
+    }
+
+    // 3) SIN dependencias => eliminación física
     await BancoCuentaModel.destroy({ where: { id } });
 
     try {
@@ -536,8 +713,19 @@ export const ER_BancoCuenta_CTS = async (req, res) => {
     }
 
     return res.json({ message: 'Cuenta bancaria eliminada correctamente.' });
-  } catch (error) {
-    console.error('ER_BancoCuenta_CTS:', error);
-    res.status(500).json({ mensajeError: error.message });
+  } catch (err) {
+    const httpErr = toHttpError(err);
+    console.error('ER_BancoCuenta_CTS:', {
+      code: httpErr.code,
+      message: httpErr.message,
+      raw: err?.message
+    });
+    return res.status(httpErr.status).json({
+      ok: false,
+      code: httpErr.code,
+      mensajeError: httpErr.message,
+      tips: httpErr.tips,
+      details: httpErr.details
+    });
   }
 };
