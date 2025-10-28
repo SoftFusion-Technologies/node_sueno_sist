@@ -944,4 +944,18 @@ router.patch('/teso-flujo/:id', UR_TesoFlujo_CTS);
 router.delete('/teso-flujo/:id', ER_TesoFlujo_CTS);
 // MODULO DE TESORERIA FIN - 21-09-2025 Benjamin Orellana
 // -------------------------
+
+import {
+  getResumenCaja,
+  getResumenPorDia,
+  getVentasDetalle
+} from '../Controllers/Analiticas/ResumenCajaController.js';
+
+router.get('/resumen-caja', getResumenCaja); // por caja o rango de fechas
+router.get('/resumen-caja/por-dia', getResumenPorDia); // agregado por día
+router.get('/resumen-caja/ventas', getVentasDetalle); // detalle de ventas (paginado)
+
+import { getVentasDesbalanceadas } from '../Controllers/Analiticas/AuditoriaController.js';
+router.get('/auditoria/ventas-desbalanceadas', getVentasDesbalanceadas);
+
 export default router;
