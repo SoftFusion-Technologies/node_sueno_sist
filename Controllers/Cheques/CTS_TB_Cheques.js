@@ -271,8 +271,9 @@ export const OBRS_ChequesPorChequera_CTS = async (req, res) => {
  * 1) Listado de cheques  GET /cheques
  *    Filtros: q (numero/beneficiario), tipo, estado, canal,
  *             banco_id, chequera_id, cliente_id, proveedor_id,
- *             rangos: emision/vencimiento/cobro_prevista (from/to)
- *    Orden: [id,tipo,estado,canal,numero,monto,fecha_emision,fecha_vencimiento,
+ *             rangos: emision/vencimiento/cobro_prevista (from/to),
+ *             formato (fisico|echeq)  <-- NUEVO
+ *    Orden: [id,tipo,estado,canal,formato,numero,monto,fecha_emision,fecha_vencimiento,  <-- NUEVO formato
  *            fecha_cobro_prevista,created_at,updated_at,cantidadMovimientos]
  * =======================================================================*/
 export const OBRS_Cheques_CTS = async (req, res) => {
@@ -297,7 +298,8 @@ export const OBRS_Cheques_CTS = async (req, res) => {
       cobro_from,
       cobro_to,
       orderBy,
-      orderDir
+      orderDir,
+      formato // <-- NUEVO
     } = req.query || {};
 
     const hasParams = Object.keys(req.query || {}).length > 0;
@@ -319,15 +321,22 @@ export const OBRS_Cheques_CTS = async (req, res) => {
         db.where(literal('CAST(numero AS CHAR)'), like)
       ];
     }
-    if (tipo && ['recibido', 'emitido'].includes(tipo)) where.tipo = tipo;
+    if (tipo && ['recibido', 'emitido'].includes(String(tipo))) where.tipo = String(tipo);
     if (estado) where.estado = estado;
-    if (canal && ['C1', 'C2'].includes(canal)) where.canal = canal;
+    if (canal && ['C1', 'C2'].includes(String(canal))) where.canal = String(canal);
+
+    // <-- NUEVO: filtro por formato
+    if (formato && ['fisico', 'echeq'].includes(String(formato).toLowerCase())) {
+      where.formato = String(formato).toLowerCase();
+    }
+
     if (banco_id) where.banco_id = Number(banco_id);
     if (chequera_id) where.chequera_id = Number(chequera_id);
     if (cliente_id) where.cliente_id = Number(cliente_id);
     if (proveedor_id) where.proveedor_id = Number(proveedor_id);
     if (venta_id) where.venta_id = Number(venta_id);
     if (compra_id) where.compra_id = Number(compra_id);
+
     // Rangos de fechas
     const addBetween = (field, from, to) => {
       if (from || to) {
@@ -345,6 +354,7 @@ export const OBRS_Cheques_CTS = async (req, res) => {
       'tipo',
       'estado',
       'canal',
+      'formato', // <-- NUEVO (permite orderBy=formato)
       'numero',
       'monto',
       'fecha_emision',
@@ -443,6 +453,7 @@ export const OBRS_Cheques_CTS = async (req, res) => {
   }
 };
 
+
 /* =========================================================================
  * 2) Detalle por ID  GET /cheques/:id
  * =======================================================================*/
@@ -484,6 +495,12 @@ export const OBR_Cheque_CTS = async (req, res) => {
  *      - upsert flujo:
  *          * recibido: ingreso (fecha_cobro_prevista si viene)
  *          * emitido : egreso (fecha_vencimiento si viene)
+ *
+ *    + Extensión (formato):
+ *      - formato requerido: 'fisico' | 'echeq' (default: 'fisico')
+ *      - emitido + fisico => chequera_id requerido (se infiere banco_id)
+ *      - emitido + echeq  => chequera_id no aplica, banco_id requerido
+ *      - recibido (fisico/echeq) => banco_id requerido, chequera_id no aplica
  * =======================================================================*/
 export const CR_Cheque_CTS = async (req, res) => {
   const body = req.body || {};
@@ -495,12 +512,26 @@ export const CR_Cheque_CTS = async (req, res) => {
 
   try {
     // 1) Validaciones de negocio (siempre via AppError)
-    if (!['recibido', 'emitido'].includes(body.tipo)) {
+    //    (Se normaliza tipo/formato para evitar mayúsculas o valores raros)
+    const tipo = String(body.tipo || '').toLowerCase();
+    const formato = String(body.formato || 'fisico').toLowerCase(); // <-- NUEVO
+
+    if (!['recibido', 'emitido'].includes(tipo)) {
       throw new AppError({
         status: 400,
         code: 'TIPO_INVALIDO',
         message: 'Tipo inválido (recibido/emitido)',
-        tips: ['Elegí recibido o emitido.']
+        tips: ['Elegí recibido o emitido.'],
+        details: { field: 'tipo' }
+      });
+    }
+    if (!['fisico', 'echeq'].includes(formato)) {
+      throw new AppError({
+        status: 400,
+        code: 'FORMATO_INVALIDO',
+        message: 'Formato inválido (fisico/echeq)',
+        tips: ['Elegí fisico o echeq.'],
+        details: { field: 'formato' }
       });
     }
     if (!body.numero || Number(body.numero) <= 0) {
@@ -523,56 +554,74 @@ export const CR_Cheque_CTS = async (req, res) => {
     }
 
     // 2) Inferencias (y lock solo donde corresponde)
+    //    banco_id puede venir en el body (recibidos y emitidos-eCheq) o inferirse (emitidos-físicos)
     let banco_id = body.banco_id ?? null;
+    let chequera_id = body.chequera_id ?? null;
 
-    if (body.tipo === 'emitido') {
-      if (!body.chequera_id) {
-        throw new AppError({
-          status: 400,
-          code: 'CHEQUERA_REQUERIDA',
-          message: 'chequera_id es requerido para cheques emitidos',
-          tips: ['Seleccioná una chequera para emitir el cheque.'],
-          details: { field: 'chequera_id' }
+    if (tipo === 'emitido') {
+      if (formato === 'fisico') {
+        // Emitido físico: chequera requerida para inferir banco_id
+        if (!chequera_id) {
+          throw new AppError({
+            status: 400,
+            code: 'CHEQUERA_REQUERIDA',
+            message: 'chequera_id es requerido para cheques emitidos físicos',
+            tips: ['Seleccioná una chequera para emitir el cheque.'],
+            details: { field: 'chequera_id' }
+          });
+        }
+
+        // Lock SOLO sobre la chequera (mínimo imprescindible)
+        const chequera = await ChequeraModel.findByPk(chequera_id, {
+          include: [
+            {
+              model: BancoCuentaModel,
+              as: 'cuenta',
+              attributes: ['id', 'banco_id'],
+              include: [{ model: BancoModel, as: 'banco', attributes: ['id'] }]
+            }
+          ],
+          transaction: t,
+          lock: t.LOCK.UPDATE
         });
-      }
 
-      // Lock SOLO sobre la chequera (mínimo imprescindible)
-      const chequera = await ChequeraModel.findByPk(body.chequera_id, {
-        include: [
-          {
-            model: BancoCuentaModel,
-            as: 'cuenta',
-            attributes: ['id', 'banco_id'],
-            include: [{ model: BancoModel, as: 'banco', attributes: ['id'] }]
-          }
-        ],
-        transaction: t,
-        lock: t.LOCK.UPDATE
-      });
+        if (!chequera) {
+          throw new AppError({
+            status: 404,
+            code: 'CHEQUERA_INEXISTENTE',
+            message: 'Chequera inexistente',
+            tips: [
+              'Actualizá la página y volvé a intentar.',
+              'Verificá que la chequera siga activa.'
+            ]
+          });
+        }
 
-      if (!chequera) {
-        throw new AppError({
-          status: 404,
-          code: 'CHEQUERA_INEXISTENTE',
-          message: 'Chequera inexistente',
-          tips: [
-            'Actualizá la página y volvé a intentar.',
-            'Verificá que la chequera siga activa.'
-          ]
-        });
-      }
-
-      banco_id = chequera?.cuenta?.banco?.id ?? null;
-      if (!banco_id) {
-        throw new AppError({
-          status: 400,
-          code: 'BANCO_NO_INFERIDO',
-          message: 'No se pudo inferir el banco propio desde la chequera',
-          tips: ['Revisá la cuenta y banco configurados para esa chequera.']
-        });
+        banco_id = chequera?.cuenta?.banco?.id ?? null;
+        if (!banco_id) {
+          throw new AppError({
+            status: 400,
+            code: 'BANCO_NO_INFERIDO',
+            message: 'No se pudo inferir el banco propio desde la chequera',
+            tips: ['Revisá la cuenta y banco configurados para esa chequera.']
+          });
+        }
+      } else {
+        // Emitido eCheq: no hay chequera; banco_id obligatorio (cuenta emisora)
+        chequera_id = null;
+        if (!banco_id) {
+          throw new AppError({
+            status: 400,
+            code: 'BANCO_REQUERIDO_EMISION_ECHEQ',
+            message: 'banco_id es requerido para emitir eCheq',
+            tips: ['Seleccioná el banco/cuenta emisora del eCheq.'],
+            details: { field: 'banco_id' }
+          });
+        }
       }
     } else {
-      // recibido
+      // Recibido (tanto físico como eCheq): chequera no aplica, banco_id requerido
+      chequera_id = null;
       if (!banco_id) {
         throw new AppError({
           status: 400,
@@ -584,15 +633,16 @@ export const CR_Cheque_CTS = async (req, res) => {
       }
     }
 
-    // 3) Crear cheque (confía en el índice único banco_id+numero)
+    // 3) Crear cheque (confía en el índice único banco_id+numero o banco_id+numero+formato según DDL)
     let nuevo;
     try {
       nuevo = await ChequeModel.create(
         {
-          tipo: body.tipo,
+          tipo, // antes: body.tipo
+          formato, // <-- NUEVO
           canal: body.canal || 'C1',
           banco_id,
-          chequera_id: body.chequera_id ?? null,
+          chequera_id,
           numero: body.numero,
           monto: body.monto,
           fecha_emision: body.fecha_emision ?? null,
@@ -603,7 +653,7 @@ export const CR_Cheque_CTS = async (req, res) => {
           venta_id: body.venta_id ?? null,
           compra_id: body.compra_id ?? null,
           beneficiario_nombre: body.beneficiario_nombre ?? null,
-          estado: body.tipo === 'recibido' ? 'en_cartera' : 'registrado',
+          estado: tipo === 'recibido' ? 'en_cartera' : 'registrado',
           motivo_estado: null,
           observaciones: body.observaciones ?? null,
           created_by: body.created_by ?? usuario_log_id ?? null,
@@ -614,6 +664,7 @@ export const CR_Cheque_CTS = async (req, res) => {
     } catch (e) {
       if (e.name === 'SequelizeUniqueConstraintError') {
         // Dejar que el catch externo lo formatee en 409 con tips:
+        // (Si migraste la unique a (banco_id,numero,formato), el duplicado será por esa combinación)
         throw e;
       }
       throw e;
@@ -626,29 +677,33 @@ export const CR_Cheque_CTS = async (req, res) => {
         tipo_mov: 'alta',
         referencia_tipo: 'otro',
         referencia_id: null,
-        notas: 'Alta de cheque'
+        notas: `Alta de ${formato === 'echeq' ? 'eCheq' : 'cheque'}`
       },
       { transaction: t }
     );
 
     // 5) Flujo proyectado
-    if (body.tipo === 'recibido' && nuevo.fecha_cobro_prevista) {
+    if (tipo === 'recibido' && nuevo.fecha_cobro_prevista) {
       await upsertFlujoCheque({
         t,
         chequeId: nuevo.id,
         signo: 'ingreso',
         fecha: nuevo.fecha_cobro_prevista,
         monto: nuevo.monto,
-        descripcion: `Proyección cobro cheque #${nuevo.numero}`
+        descripcion: `Proyección cobro ${
+          formato === 'echeq' ? 'eCheq' : 'cheque'
+        } #${nuevo.numero}`
       });
-    } else if (body.tipo === 'emitido' && nuevo.fecha_vencimiento) {
+    } else if (tipo === 'emitido' && nuevo.fecha_vencimiento) {
       await upsertFlujoCheque({
         t,
         chequeId: nuevo.id,
         signo: 'egreso',
         fecha: nuevo.fecha_vencimiento,
         monto: nuevo.monto,
-        descripcion: `Proyección egreso cheque emitido #${nuevo.numero}`
+        descripcion: `Proyección egreso ${
+          formato === 'echeq' ? 'eCheq emitido' : 'cheque emitido'
+        } #${nuevo.numero}`
       });
     }
 
@@ -661,7 +716,9 @@ export const CR_Cheque_CTS = async (req, res) => {
         req,
         'cheques',
         'crear',
-        `creó el cheque #${nuevo.numero} (${nuevo.tipo})`,
+        `creó el ${formato === 'echeq' ? 'eCheq' : 'cheque'} #${
+          nuevo.numero
+        } (${nuevo.tipo})`,
         usuario_log_id
       );
     } catch (logErr) {
@@ -697,6 +754,13 @@ export const CR_Cheque_CTS = async (req, res) => {
  * 4) Editar cheque  PUT/PATCH /cheques/:id
  *    - Protege unicidad banco+numero si cambia
  *    - Recalcula proyección de flujo si cambian fechas relevantes
+ *
+ *    + Extensión (formato):
+ *      - formato requerido: 'fisico' | 'echeq' (default lógico al editar: conservar actual o 'fisico')
+ *      - emitido + fisico => chequera_id requerido (se infiere banco_id)
+ *      - emitido + echeq  => chequera_id no aplica, banco_id requerido
+ *      - recibido (fisico/echeq) => banco_id requerido, chequera_id no aplica
+ *      - Si migraste la UNIQUE a (banco_id,numero,formato), la colisión será por esa combinación
  * =======================================================================*/
 export const UR_Cheque_CTS = async (req, res) => {
   const { id } = req.params;
@@ -722,9 +786,17 @@ export const UR_Cheque_CTS = async (req, res) => {
       });
     }
 
-    // 2) Resolver candidatos
+    // 2) Resolver candidatos (conservando valores existentes por default)
+    //    Normalizamos tipo/formato en minúsculas para robustez
     let tipo = body.tipo ?? antes.tipo;
+    tipo = typeof tipo === 'string' ? tipo.toLowerCase() : tipo;
+
     let canal = body.canal ?? antes.canal;
+
+    // <-- NUEVO: formato (default al valor anterior o 'fisico' si no existiera)
+    let formato = body.formato ?? antes.formato ?? 'fisico';
+    formato = typeof formato === 'string' ? formato.toLowerCase() : formato;
+
     let chequera_id = body.chequera_id ?? antes.chequera_id;
     let banco_id = body.banco_id ?? antes.banco_id;
     let numero = body.numero ?? antes.numero;
@@ -747,57 +819,83 @@ export const UR_Cheque_CTS = async (req, res) => {
         status: 400,
         code: 'TIPO_INVALIDO',
         message: 'Tipo inválido (recibido/emitido)',
-        tips: ['Elegí recibido o emitido.']
+        tips: ['Elegí recibido o emitido.'],
+        details: { field: 'tipo' }
+      });
+    }
+    if (!['fisico', 'echeq'].includes(formato)) {
+      throw new AppError({
+        status: 400,
+        code: 'FORMATO_INVALIDO',
+        message: 'Formato inválido (fisico/echeq)',
+        tips: ['Elegí fisico o echeq.'],
+        details: { field: 'formato' }
       });
     }
 
     if (tipo === 'emitido') {
-      if (!chequera_id) {
-        throw new AppError({
-          status: 400,
-          code: 'CHEQUERA_REQUERIDA',
-          message: 'chequera_id es requerido para cheques emitidos',
-          tips: ['Seleccioná una chequera.'],
-          details: { field: 'chequera_id' }
-        });
-      }
+      if (formato === 'fisico') {
+        // Emitido físico: chequera requerida para inferir banco_id
+        if (!chequera_id) {
+          throw new AppError({
+            status: 400,
+            code: 'CHEQUERA_REQUERIDA',
+            message: 'chequera_id es requerido para cheques emitidos físicos',
+            tips: ['Seleccioná una chequera.'],
+            details: { field: 'chequera_id' }
+          });
+        }
 
-      // Lock mínimo en la chequera para inferir banco y mantener orden de locks
-      const chequera = await ChequeraModel.findByPk(chequera_id, {
-        include: [
-          {
-            model: BancoCuentaModel,
-            as: 'cuenta',
-            attributes: ['id', 'banco_id'],
-            include: [{ model: BancoModel, as: 'banco', attributes: ['id'] }]
-          }
-        ],
-        transaction: t,
-        lock: t.LOCK.UPDATE
-      });
-      if (!chequera) {
-        throw new AppError({
-          status: 404,
-          code: 'CHEQUERA_INEXISTENTE',
-          message: 'Chequera inexistente',
-          tips: [
-            'Actualizá la página y volvé a intentar.',
-            'Verificá que la chequera siga activa.'
-          ]
+        // Lock mínimo en la chequera para inferir banco y mantener orden de locks
+        const chequera = await ChequeraModel.findByPk(chequera_id, {
+          include: [
+            {
+              model: BancoCuentaModel,
+              as: 'cuenta',
+              attributes: ['id', 'banco_id'],
+              include: [{ model: BancoModel, as: 'banco', attributes: ['id'] }]
+            }
+          ],
+          transaction: t,
+          lock: t.LOCK.UPDATE
         });
-      }
+        if (!chequera) {
+          throw new AppError({
+            status: 404,
+            code: 'CHEQUERA_INEXISTENTE',
+            message: 'Chequera inexistente',
+            tips: [
+              'Actualizá la página y volvé a intentar.',
+              'Verificá que la chequera siga activa.'
+            ]
+          });
+        }
 
-      banco_id = chequera?.cuenta?.banco?.id ?? null;
-      if (!banco_id) {
-        throw new AppError({
-          status: 400,
-          code: 'BANCO_NO_INFERIDO',
-          message: 'No se pudo inferir el banco propio desde la chequera',
-          tips: ['Revisá la cuenta y banco configurados para esa chequera.']
-        });
+        banco_id = chequera?.cuenta?.banco?.id ?? null;
+        if (!banco_id) {
+          throw new AppError({
+            status: 400,
+            code: 'BANCO_NO_INFERIDO',
+            message: 'No se pudo inferir el banco propio desde la chequera',
+            tips: ['Revisá la cuenta y banco configurados para esa chequera.']
+          });
+        }
+      } else {
+        // Emitido + eCheq: chequera NO aplica; banco_id requerido (cuenta emisora)
+        chequera_id = null;
+        if (!banco_id) {
+          throw new AppError({
+            status: 400,
+            code: 'BANCO_REQUERIDO_EMISION_ECHEQ',
+            message: 'banco_id es requerido para emitir eCheq',
+            tips: ['Seleccioná el banco/cuenta emisora del eCheq.'],
+            details: { field: 'banco_id' }
+          });
+        }
       }
     } else {
-      // recibido
+      // Recibido (físico/eCheq): chequera no aplica; banco_id requerido
+      chequera_id = null;
       if (!banco_id) {
         throw new AppError({
           status: 400,
@@ -807,15 +905,16 @@ export const UR_Cheque_CTS = async (req, res) => {
           details: { field: 'banco_id' }
         });
       }
-      // Si te pasan chequera_id en "recibido", podés ignorarlo o validarlo según negocio
-      // chequera_id = null;
     }
 
-    // 4) UPDATE directo, confiando en UNIQUE (banco_id, numero); capturamos uniqueness en el catch externo
+    // 4) UPDATE directo, confiando en UNIQUE
+    //    - Si migraste UNIQUE a (banco_id, numero, formato), Sequelize protegerá esa combinación.
+    //    - El catch externo mapea duplicados, timeouts, etc.
     try {
       const [updated] = await ChequeModel.update(
         {
           tipo,
+          formato, // <-- NUEVO
           canal,
           banco_id,
           chequera_id,
@@ -857,7 +956,9 @@ export const UR_Cheque_CTS = async (req, res) => {
           signo: 'ingreso',
           fecha: despues.fecha_cobro_prevista,
           monto: despues.monto,
-          descripcion: `Proyección cobro cheque #${despues.numero}`
+          descripcion: `Proyección cobro ${
+            despues.formato === 'echeq' ? 'eCheq' : 'cheque'
+          } #${despues.numero}`
         });
       } else {
         await deleteFlujoCheque({ t, chequeId: id });
@@ -870,7 +971,9 @@ export const UR_Cheque_CTS = async (req, res) => {
           signo: 'egreso',
           fecha: despues.fecha_vencimiento,
           monto: despues.monto,
-          descripcion: `Proyección egreso cheque emitido #${despues.numero}`
+          descripcion: `Proyección egreso ${
+            despues.formato === 'echeq' ? 'eCheq emitido' : 'cheque emitido'
+          } #${despues.numero}`
         });
       } else {
         await deleteFlujoCheque({ t, chequeId: id });
@@ -886,7 +989,9 @@ export const UR_Cheque_CTS = async (req, res) => {
         req,
         'cheques',
         'editar',
-        `actualizó el cheque #${antes.numero} → #${despues.numero} (${despues.tipo})`,
+        `actualizó ${despues.formato === 'echeq' ? 'eCheq' : 'cheque'} #${
+          antes.numero
+        } → #${despues.numero} (${despues.tipo})`,
         usuario_log_id
       );
     } catch (logErr) {
@@ -925,6 +1030,10 @@ export const UR_Cheque_CTS = async (req, res) => {
  *    - Si tiene movimientos de cheque => requiere ?forzar (409 con tips)
  *    - Si ?forzar=true => ANULAR (estado='anulado') + borrar flujo
  *    - Si no tiene dependencias => eliminación física
+ *
+ *    Nota formato (fisico/echeq):
+ *      - No cambia reglas para eliminar/anular.
+ *      - Solo se usa para mensajes/bitácora descriptivos.
  * =======================================================================*/
 export const ER_Cheque_CTS = async (req, res) => {
   const id = Number(req.params.id);
@@ -958,6 +1067,18 @@ export const ER_Cheque_CTS = async (req, res) => {
         code: 'CHEQUE_NO_ENCONTRADO',
         message: 'Cheque no encontrado',
         tips: ['Actualizá la lista y volvé a intentar.']
+      });
+    }
+
+    // Si ya está anulado, idempotencia suave: no hacemos nada más que borrar flujo por las dudas
+    if (cheque.estado === 'anulado' && !forzado) {
+      await deleteFlujoCheque({ t, chequeId: id });
+      await t.commit();
+      return res.json({
+        ok: true,
+        message: `${
+          cheque.formato === 'echeq' ? 'eCheq' : 'Cheque'
+        } ya estaba anulado. No se realizaron cambios.`
       });
     }
 
@@ -1004,9 +1125,13 @@ export const ER_Cheque_CTS = async (req, res) => {
 
     // 4) Ejecutar acción
     if (cantMovs > 1 && forzado) {
-      // ANULAR
+      // ANULAR (mantener registro, limpiar flujo)
       await ChequeModel.update(
-        { estado: 'anulado', motivo_estado: 'Anulado por usuario' },
+        {
+          estado: 'anulado',
+          motivo_estado:
+            cheque.motivo_estado ?? 'Anulado por usuario (operación forzada)'
+        },
         { where: { id }, transaction: t }
       );
       await deleteFlujoCheque({ t, chequeId: id });
@@ -1028,14 +1153,18 @@ export const ER_Cheque_CTS = async (req, res) => {
           req,
           'cheques',
           'editar',
-          `anuló el cheque #${cheque.numero}`,
+          `anuló el ${cheque.formato === 'echeq' ? 'eCheq' : 'cheque'} #${
+            cheque.numero
+          }`,
           usuario_log_id
         );
       } catch {}
 
       return res.json({
         ok: true,
-        message: 'Cheque ANULADO (tenía movimientos).'
+        message: `${
+          cheque.formato === 'echeq' ? 'eCheq' : 'Cheque'
+        } ANULADO (tenía movimientos).`
       });
     }
 
@@ -1049,7 +1178,9 @@ export const ER_Cheque_CTS = async (req, res) => {
         req,
         'cheques',
         'eliminar',
-        `eliminó el cheque #${cheque.numero}`,
+        `eliminó el ${cheque.formato === 'echeq' ? 'eCheq' : 'cheque'} #${
+          cheque.numero
+        }`,
         usuario_log_id
       );
     } catch {}
@@ -1081,6 +1212,9 @@ export const ER_Cheque_CTS = async (req, res) => {
  *    - Cambia estado a 'depositado'
  *    - Registra movimiento de cheque (referencia_id = banco_cuenta_id)
  *    - Upsert flujo ingreso (fecha_cobro_prevista)
+ *
+ *    Nota formato (fisico/echeq):
+ *      - No cambia reglas; solo usamos el formato para textos/bitácora/flujo.
  * =======================================================================*/
 export const TR_Depositar_Cheque_CTS = async (req, res) => {
   const id = Number(req.params.id);
@@ -1125,6 +1259,7 @@ export const TR_Depositar_Cheque_CTS = async (req, res) => {
         .status(400)
         .json({ mensajeError: 'Cuenta bancaria de depósito inexistente' });
 
+    // Actualizamos estado y (opcionalmente) la fecha de cobro prevista
     await ChequeModel.update(
       {
         estado: 'depositado',
@@ -1134,6 +1269,7 @@ export const TR_Depositar_Cheque_CTS = async (req, res) => {
       { where: { id }, transaction: t }
     );
 
+    // Movimiento del cheque
     await ChequeMovimientoModel.create(
       {
         cheque_id: id,
@@ -1141,7 +1277,9 @@ export const TR_Depositar_Cheque_CTS = async (req, res) => {
         fecha_mov: fecha_deposito ?? new Date(),
         referencia_tipo: 'deposito',
         referencia_id: banco_cuenta_id,
-        notas: `Depósito en cuenta "${cuenta.nombre_cuenta}"`
+        notas: `Depósito de ${
+          cheque.formato === 'echeq' ? 'eCheq' : 'cheque'
+        } en cuenta "${cuenta.nombre_cuenta}"`
       },
       { transaction: t }
     );
@@ -1155,7 +1293,9 @@ export const TR_Depositar_Cheque_CTS = async (req, res) => {
         signo: 'ingreso',
         fecha: chq.fecha_cobro_prevista,
         monto: chq.monto,
-        descripcion: `Proyección cobro cheque #${chq.numero}`
+        descripcion: `Proyección cobro ${
+          chq.formato === 'echeq' ? 'eCheq' : 'cheque'
+        } #${chq.numero}`
       });
     }
 
@@ -1165,7 +1305,9 @@ export const TR_Depositar_Cheque_CTS = async (req, res) => {
         req,
         'cheques',
         'editar',
-        `depositó el cheque #${cheque.numero}`,
+        `depositó el ${cheque.formato === 'echeq' ? 'eCheq' : 'cheque'} #${
+          cheque.numero
+        }`,
         usuario_log_id
       );
     } catch {}
@@ -1178,6 +1320,7 @@ export const TR_Depositar_Cheque_CTS = async (req, res) => {
     res.status(500).json({ mensajeError: error.message });
   }
 };
+
 
 /* =========================================================================
  * 7) Transición: acreditar (recibido)  PATCH /cheques/:id/acreditar

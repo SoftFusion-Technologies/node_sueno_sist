@@ -1,10 +1,11 @@
 /*
  * Programador: Benjamin Orellana
  * Fecha Creación: 20 / 09 / 2025
- * Versión: 1.0
+ * Versión: 1.1
  *
  * Descripción:
  * Modelo Sequelize para la tabla 'cheques' (recibidos de clientes / emitidos a proveedores).
+ * Incorpora el campo 'formato' para distinguir físico vs eCheq.
  */
 
 import dotenv from 'dotenv';
@@ -32,6 +33,14 @@ export const ChequeModel = db.define(
       allowNull: false,
       defaultValue: 'C1'
     },
+
+    // ⬇️ Nuevo campo
+    formato: {
+      type: DataTypes.ENUM('fisico', 'echeq'),
+      allowNull: false,
+      defaultValue: 'fisico'
+    },
+
     banco_id: {
       type: DataTypes.BIGINT.UNSIGNED,
       allowNull: true,
@@ -39,7 +48,7 @@ export const ChequeModel = db.define(
     },
     chequera_id: {
       type: DataTypes.BIGINT.UNSIGNED,
-      allowNull: true, // requerido cuando tipo='emitido' (validación abajo)
+      allowNull: true, // requerido sólo si tipo='emitido' y formato='fisico'
       references: { model: 'chequeras', key: 'id' }
     },
     numero: {
@@ -135,19 +144,31 @@ export const ChequeModel = db.define(
     indexes: [
       { name: 'idx_tipo_estado', fields: ['tipo', 'estado'] },
       {
-        name: 'idx_banco_numero',
-        fields: ['banco_id', 'numero'],
+        name: 'uq_banco_numero_formato',
+        fields: ['banco_id', 'numero', 'formato'],
         unique: true
       },
       { name: 'idx_fecha_cobro_prevista', fields: ['fecha_cobro_prevista'] },
       { name: 'idx_chequera', fields: ['chequera_id'] },
-      { name: 'idx_estado', fields: ['estado'] }
+      { name: 'idx_estado', fields: ['estado'] },
+      { name: 'idx_cheques_formato', fields: ['formato'] } // útil para filtros
     ],
     validate: {
       chequeraRequeridaParaEmitidos() {
-        if (this.tipo === 'emitido' && this.chequera_id == null) {
-          throw new Error('chequera_id es requerido cuando tipo = emitido');
+        // Requerido sólo para cheques emitidos físicos
+        if (
+          this.tipo === 'emitido' &&
+          this.formato === 'fisico' &&
+          this.chequera_id == null
+        ) {
+          throw new Error(
+            'chequera_id es requerido cuando tipo = emitido y formato = fisico'
+          );
         }
+        // Si es eCheq, no exigimos chequera. Opcionalmente, podés forzar que sea null:
+        // if (this.formato === 'echeq' && this.chequera_id != null) {
+        //   throw new Error('chequera_id debe ser NULL cuando formato = echeq');
+        // }
       }
     }
   }
