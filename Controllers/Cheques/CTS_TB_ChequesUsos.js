@@ -258,8 +258,8 @@ export const CR_ChequeUso_Usar_CTS = async (req, res) => {
         try {
           await registrarLog(
             req,
-            'cheques',
-            'usar-replay',
+            'cheques_usos',
+            'crear',
             `replay de "${dup.accion}" en cheque_id=${dup.cheque_id} uso_id=${dup.id} idem=${idem}`,
             usuario_id
           );
