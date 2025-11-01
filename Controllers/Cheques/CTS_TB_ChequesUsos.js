@@ -21,31 +21,71 @@ import { ChequeModel } from '../../Models/Cheques/MD_TB_Cheques.js';
 import { ChequeUsoModel } from '../../Models/Cheques/MD_TB_ChequesUsos.js';
 import { ChequeMovimientoModel } from '../../Models/Cheques/MD_TB_ChequeMovimientos.js';
 
+const fmtAR = (n) =>
+  new Intl.NumberFormat('es-AR', { style: 'currency', currency: 'ARS' }).format(
+    Number(n) || 0
+  );
+
 // ---- helpers existentes ----
 const assert = (cond, message, meta = {}) => {
-  if (!cond) throw new AppError({ status: 400, code: 'VALIDATION_ERROR', message, details: meta });
+  if (!cond)
+    throw new AppError({
+      status: 400,
+      code: 'VALIDATION_ERROR',
+      message,
+      details: meta
+    });
 };
 const nextEstadoFromAccion = (accion) =>
-  ({ aplicar_a_compra: 'aplicado_a_compra', depositar: 'depositado', entregar: 'entregado', rechazar: 'rechazado', anular: 'anulado' }[accion] || null);
+  ({
+    aplicar_a_compra: 'aplicado_a_compra',
+    depositar: 'depositado',
+    entregar: 'entregado',
+    rechazar: 'rechazado',
+    anular: 'anulado'
+  }[accion] || null);
 function validarReglas(accion, chq, body) {
   if (accion === 'depositar') {
-    assert(chq.tipo === 'recibido', 'Sólo cheques recibidos pueden depositarse');
-    assert(chq.estado === 'en_cartera', 'El cheque debe estar en cartera para depositarlo', { estado: chq.estado });
+    assert(
+      chq.tipo === 'recibido',
+      'Sólo cheques recibidos pueden depositarse'
+    );
+    assert(
+      chq.estado === 'en_cartera',
+      'El cheque debe estar en cartera para depositarlo',
+      { estado: chq.estado }
+    );
     assert(body.fecha_valor, 'fecha_valor requerida (fecha de depósito)');
   }
   if (accion === 'aplicar_a_compra') {
-    assert(chq.tipo === 'recibido', 'Sólo cheques recibidos pueden aplicarse a compra');
-    assert(['en_cartera', 'acreditado'].includes(chq.estado), 'El cheque debe estar en cartera o acreditado para aplicarse a compra', { estado: chq.estado });
+    assert(
+      chq.tipo === 'recibido',
+      'Sólo cheques recibidos pueden aplicarse a compra'
+    );
+    assert(
+      ['en_cartera', 'acreditado'].includes(chq.estado),
+      'El cheque debe estar en cartera o acreditado para aplicarse a compra',
+      { estado: chq.estado }
+    );
     assert(body.proveedor_id, 'proveedor_id requerido para aplicar a compra');
   }
-  if (accion === 'rechazar') assert(chq.tipo === 'recibido', 'Sólo cheques recibidos pueden rechazarse');
-  if (accion === 'anular') assert(['registrado','en_cartera'].includes(chq.estado), 'Sólo cheques sin uso pueden anularse');
-  if (accion === 'entregar') assert(chq.estado === 'en_cartera', 'Sólo cheques en cartera pueden entregarse');
+  if (accion === 'rechazar')
+    assert(chq.tipo === 'recibido', 'Sólo cheques recibidos pueden rechazarse');
+  if (accion === 'anular')
+    assert(
+      ['registrado', 'en_cartera'].includes(chq.estado),
+      'Sólo cheques sin uso pueden anularse'
+    );
+  if (accion === 'entregar')
+    assert(
+      chq.estado === 'en_cartera',
+      'Sólo cheques en cartera pueden entregarse'
+    );
 }
 
 // ---- NUEVO: mapping para movimientos ----
 const mapAccionToMovimiento = (accion, body) => {
-  const tipo_mov = ({
+  const tipo_mov = {
     aplicar_a_compra: 'aplicacion',
     depositar: 'deposito',
     acreditar: 'acreditacion',
@@ -53,31 +93,30 @@ const mapAccionToMovimiento = (accion, body) => {
     rechazar: 'rechazo',
     anular: 'anulacion',
     compensar: 'compensacion'
-  }[accion]);
+  }[accion];
 
   let referencia_tipo = 'otro';
   let referencia_id = null;
 
   if (accion === 'aplicar_a_compra') {
     referencia_tipo = 'compra';
-    referencia_id   = body.compra_id || body.proveedor_id || null;
+    referencia_id = body.compra_id || body.proveedor_id || null;
   } else if (accion === 'depositar') {
     referencia_tipo = 'deposito';
-    referencia_id   = body.banco_cuenta_id || null;
+    referencia_id = body.banco_cuenta_id || null;
   } else if (accion === 'acreditar') {
     referencia_tipo = 'conciliacion';
-    referencia_id   = body.banco_cuenta_id || null;
+    referencia_id = body.banco_cuenta_id || null;
   } else if (accion === 'entregar') {
     referencia_tipo = 'pago';
-    referencia_id   = body.proveedor_id || null;
+    referencia_id = body.proveedor_id || null;
   } else if (accion === 'compensar') {
     referencia_tipo = 'conciliacion';
-    referencia_id   = body.banco_cuenta_id || null;
+    referencia_id = body.banco_cuenta_id || null;
   }
 
   return { tipo_mov, referencia_tipo, referencia_id };
 };
-
 
 // ============================ 1) Listado ============================
 /**
@@ -258,12 +297,24 @@ export const CR_ChequeUso_Usar_CTS = async (req, res) => {
         try {
           await registrarLog(
             req,
-            'cheques_usos',
-            'crear',
-            `replay de "${dup.accion}" en cheque_id=${dup.cheque_id} uso_id=${dup.id} idem=${idem}`,
+            'cheques',
+            'usar',
+            `aplicó "${accion}" al cheque #${chq.numero}: ${
+              prevEstado || '—'
+            } → ${nextEstado || prevEstado} · monto=${fmtAR(
+              montoUsar
+            )} · uso_id=${uso.id}${mov?.id ? ` · mov_id=${mov.id}` : ''}${
+              body.compra_id ? ` · compra_id=${body.compra_id}` : ''
+            }${
+              body.proveedor_id ? ` · proveedor_id=${body.proveedor_id}` : ''
+            }${body.caja_id ? ` · caja_id=${body.caja_id}` : ''}${
+              idem ? ` · idem=${idem}` : ''
+            }`,
             usuario_id
           );
-        } catch {}
+        } catch (logErr) {
+          console.warn('registrarLog falló:', logErr?.message || logErr);
+        }
         return res.json({
           ok: true,
           replay: true,
