@@ -958,4 +958,18 @@ router.get('/resumen-caja/ventas', getVentasDetalle); // detalle de ventas (pagi
 import { getVentasDesbalanceadas } from '../Controllers/Analiticas/AuditoriaController.js';
 router.get('/auditoria/ventas-desbalanceadas', getVentasDesbalanceadas);
 
+
+// routes.js
+import {
+  OBRS_ChequesUsos_CTS,
+  OBR_ChequeUso_CTS,
+  CR_ChequeUso_Usar_CTS,
+  CR_ChequeUso_Acreditar_CTS
+} from '../Controllers/Cheques/CTS_TB_ChequesUsos.js';
+
+router.get('/cheques-usos', OBRS_ChequesUsos_CTS);
+router.get('/cheques-usos/:id', OBR_ChequeUso_CTS);
+router.post('/cheques-usos/usar/:cheque_id', CR_ChequeUso_Usar_CTS);
+router.post('/cheques-usos/acreditar/:cheque_id', CR_ChequeUso_Acreditar_CTS);
+
 export default router;

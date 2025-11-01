@@ -64,6 +64,9 @@ import { ChequeMovimientoModel } from './Cheques/MD_TB_ChequeMovimientos.js';
 // imagenes de cheques
 import { ChequeImagenModel } from './Cheques/MD_TB_ChequeImagenes.js';
 import { ChequeImagenEventoModel } from './Cheques/MD_TB_ChequeImagenEventos.js';
+
+// NUEVO: usos de cheques (historial/auditoría)
+import { ChequeUsoModel } from './Cheques/MD_TB_ChequesUsos.js';
 // RELACIONES MODULO DE CHEQUES - FIN
 
 // RELACIONES MODULO DE TESORERIA - INI
@@ -410,6 +413,19 @@ ChequeModel.hasMany(ChequeImagenEventoModel, {
   foreignKey: 'cheque_id',
   onUpdate: 'CASCADE',
   onDelete: 'CASCADE'
+});
+
+// --- Asociaciones principales ---
+ChequeModel.hasMany(ChequeUsoModel, {
+  foreignKey: 'cheque_id',
+  as: 'usos',                 // cheque.getUsos()
+  onDelete: 'CASCADE',        // si se borra el cheque, se borran los usos
+  onUpdate: 'CASCADE'
+});
+
+ChequeUsoModel.belongsTo(ChequeModel, {
+  foreignKey: 'cheque_id',
+  as: 'cheque'
 });
 // RELACIONES MODULO DE CHEQUES - FIN
 

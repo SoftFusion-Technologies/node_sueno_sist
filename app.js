@@ -55,6 +55,8 @@ const corsOptions = {
     'Authorization',
     'X-User-Id', // ✅ agrega tu header custom
     'x-user-id', // (opcional) por si el browser lo baja en minúsculas
+    'Idempotency-Key',
+    'idempotency-key',
     'x-client-reported-time',
     'x-time-guard-reason'
   ],
