@@ -39,13 +39,14 @@ timeRouter.get('/time', async (req, res) => {
       'Surrogate-Control': 'no-store'
     });
 
-    console.log(JSON.stringify({
-      msg: 'time_endpoint_hit',
-      forceRefresh: !!force,
-      timeSource: getSource?.(),
-      ntpOffsetMs: getOffsetMs?.(),
-      serverUnixMs: data.serverUnixMs
-    }));
+    // DESCOMENTAR PARA SEGUIMIENTO
+    // console.log(JSON.stringify({
+    //   msg: 'time_endpoint_hit',
+    //   forceRefresh: !!force,
+    //   timeSource: getSource?.(),
+    //   ntpOffsetMs: getOffsetMs?.(),
+    //   serverUnixMs: data.serverUnixMs
+    // }));
 
     return res.status(200).json(data);
   } catch (e) {

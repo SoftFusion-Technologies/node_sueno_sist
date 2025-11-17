@@ -109,8 +109,21 @@ export const ProveedorCuentasBancariasModel = db.define(
       validate: {
         isCBUorNull(value) {
           if (value == null || value === '') return;
-          if (!isValidCBU(value))
+
+          // 💡 En desarrollo: solo exigir 22 dígitos
+          if (process.env.NODE_ENV !== 'production') {
+            if (!/^\d{22}$/.test(value)) {
+              throw new Error(
+                'CBU inválido (en dev: deben ser 22 dígitos numéricos).'
+              );
+            }
+            return;
+          }
+
+          // ✅ En producción: aplicar algoritmo BCRA completo
+          if (!isValidCBU(value)) {
             throw new Error('CBU inválido (deben ser 22 dígitos válidos).');
+          }
         }
       }
     },

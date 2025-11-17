@@ -42,7 +42,6 @@ export const OBRS_Productos_CTS = async (req, res) => {
       orderDir
     } = req.query || {};
 
-    // Detectar si el cliente realmente mandó parámetros (para retrocompat)
     const hasParams =
       Object.prototype.hasOwnProperty.call(req.query, 'page') ||
       Object.prototype.hasOwnProperty.call(req.query, 'limit') ||
@@ -53,7 +52,7 @@ export const OBRS_Productos_CTS = async (req, res) => {
       Object.prototype.hasOwnProperty.call(req.query, 'orderBy') ||
       Object.prototype.hasOwnProperty.call(req.query, 'orderDir');
 
-    // 🔁 SIN params -> comportamiento EXACTO actual (array plano con include categoría)
+    // 🔁 SIN params -> compat: array plano
     if (!hasParams) {
       const productos = await ProductosModel.findAll({
         include: {
@@ -71,34 +70,38 @@ export const OBRS_Productos_CTS = async (req, res) => {
     const limitNum = Math.min(Math.max(parseInt(limit || '20', 10), 1), 100);
     const offset = (pageNum - 1) * limitNum;
 
-    // WHERE: ajustá los campos a tu esquema (estos son comunes)
     const where = {};
 
+    // 🔎 Búsqueda por texto
     if (q && q.trim() !== '') {
       const like = { [Op.like]: `%${q.trim()}%` };
-      // Sumá/quitá claves según tus columnas reales
+
+      // Usamos SOLO columnas que existen en tu esquema
       where[Op.or] = [
         { nombre: like },
-        { codigo: like },
         { descripcion: like },
-        { barcode: like } // si existe
+        // si tenés estas columnas, las dejás, si no las borrás:
+        { marca: like },
+        { modelo: like },
+        { medida: like },
+        { codigo_sku: like }
       ];
     }
 
     if (categoriaId && Number(categoriaId) > 0) {
-      where.categoria_id = Number(categoriaId); // ajustá a tu FK real
+      where.categoria_id = Number(categoriaId);
     }
 
     if (estado && typeof estado === 'string') {
-      // si usás estado 'activo'/'inactivo' o similar
       where.estado = estado;
     }
 
-    // Filtro por proveedor usando EXISTS sobre la tabla pivote
+    // Filtro por proveedor (tabla pivote producto_proveedor)
     if (proveedorId && Number(proveedorId) > 0) {
-      const ppTable = ProductoProveedorModel.getTableName(); // ej: 'producto_proveedor'
-      const prodTable = ProductosModel.getTableName(); // ej: 'productos'
+      const ppTable = ProductoProveedorModel.getTableName();
+      const prodTable = ProductosModel.getTableName();
       const provId = Number(proveedorId);
+
       where[Op.and] = [
         literal(`EXISTS (
           SELECT 1
@@ -109,24 +112,26 @@ export const OBRS_Productos_CTS = async (req, res) => {
       ];
     }
 
-    // Orden permitido (evitamos SQL injection)
+    // 🔁 Orden permitido
     const validColumns = [
       'id',
       'nombre',
-      'codigo',
       'created_at',
-      'updated_at'
-      // Podés agregar 'precio' si existe y querés permitir orden por precio
+      'updated_at',
+      // si querés permitir ordenar por precio:
+      'precio'
+      // y si tenés codigo_sku y te interesa:
+      // 'codigo_sku'
     ];
+
     const col = validColumns.includes(orderBy || '') ? orderBy : 'id';
     const dir = ['ASC', 'DESC'].includes(String(orderDir || '').toUpperCase())
       ? String(orderDir).toUpperCase()
       : 'ASC';
 
-    // 1) Conteo (sin include)
+    // 1) Conteo
     const total = await ProductosModel.count({ where });
 
-    // Si no hay filas, devolvemos vació rápido
     if (total === 0) {
       return res.json({
         data: [],
@@ -147,7 +152,7 @@ export const OBRS_Productos_CTS = async (req, res) => {
       });
     }
 
-    // 2) Buscar IDs en el orden requerido (sin include para evitar subquery pesado)
+    // 2) Buscar ids en el orden requerido
     const idRows = await ProductosModel.findAll({
       where,
       attributes: ['id'],
@@ -158,7 +163,7 @@ export const OBRS_Productos_CTS = async (req, res) => {
     });
     const ids = idRows.map((r) => r.id);
 
-    // 3) Traer las filas completas con include de categoría, y reordenarlas según "ids"
+    // 3) Traer filas completas + categoría y reordenar
     let rows = await ProductosModel.findAll({
       where: { id: ids },
       include: {
@@ -168,11 +173,11 @@ export const OBRS_Productos_CTS = async (req, res) => {
       }
     });
 
-    // Reordenar en memoria según "ids"
     const index = new Map(ids.map((id, i) => [id, i]));
     rows.sort((a, b) => index.get(a.id) - index.get(b.id));
 
     const totalPages = Math.max(Math.ceil(total / limitNum), 1);
+
     return res.json({
       data: rows,
       meta: {
@@ -191,6 +196,7 @@ export const OBRS_Productos_CTS = async (req, res) => {
       }
     });
   } catch (error) {
+    console.error('[OBRS_Productos_CTS] Error:', error); // 👈 para ver bien el motivo
     res.status(500).json({ mensajeError: error.message });
   }
 };

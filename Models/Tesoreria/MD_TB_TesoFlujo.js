@@ -24,7 +24,14 @@ export const TesoFlujoModel = db.define(
       primaryKey: true
     },
     origen_tipo: {
-      type: DataTypes.ENUM('cheque', 'transferencia', 'efectivo', 'otro'),
+      type: DataTypes.ENUM(
+        'compra',
+        'venta',
+        'cheque',
+        'transferencia',
+        'efectivo',
+        'otro'
+      ),
       allowNull: false,
       defaultValue: 'cheque'
     },

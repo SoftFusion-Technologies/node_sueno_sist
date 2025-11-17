@@ -29,6 +29,8 @@ import { registrarLog } from '../../Helpers/registrarLog.js';
 
 import jwt from 'jsonwebtoken';
 
+import { TesoFlujoModel } from '../../Models/Tesoreria/MD_TB_TesoFlujo.js';
+
 const WIDTHS_SKU = {
   prod: 5,
   local: 3,
@@ -569,6 +571,26 @@ export const registrarVenta = async (req, res) => {
         descripcion: `Venta #${venta.id}`,
         monto: totalFinal,
         referencia: String(venta.id)
+      },
+      { transaction: t }
+    );
+    // === Tesorería: proyección de flujo de fondos por la venta ===
+    // OJO: teso_flujo.fecha es DATEONLY, nos quedamos con el día.
+    const fechaSoloDia =
+      fechaFinal instanceof Date
+        ? fechaFinal.toISOString().slice(0, 10)
+        : fechaFinal;
+
+    await TesoFlujoModel.create(
+      {
+        origen_tipo: 'venta',
+        origen_id: venta.id,
+        fecha: fechaSoloDia,
+        signo: 'ingreso',
+        monto: totalFinal,
+        descripcion: `Venta #${venta.id} - ${
+          medioPago?.nombre || `MedioPago#${medio_pago_id}`
+        }`
       },
       { transaction: t }
     );

@@ -17,9 +17,17 @@ import path from 'node:path';
 
 const BASE_UPLOAD_DIR = path.join(process.cwd(), 'uploads');
 
+// Relaciones generales - Benjamin Orellana 10-09-2025 INI
 import './Models/relaciones.js';
-// Importar relaciones
+// Relaciones generales - Benjamin Orellana 10-09-2025 FIN
+
+// Relaciones de Proveedores - Benjamin Orellana 12-09-2025 INI
 import './Models/Proveedores/relacionesProveedor.js';
+// Relaciones de Proveedores - Benjamin Orellana 12-09-2025 FIN
+
+// Relaciones de compras - Benjamin Orellana 2-11-2025 INI
+import './Models/Compras/compras_relaciones.js';
+// Relaciones de compras - Benjamin Orellana 2-11-2025 FIN
 
 import { timeRouter } from './Routes/time.routes.js';
 import { timeGuard } from './Middlewares/timeGuard.js';

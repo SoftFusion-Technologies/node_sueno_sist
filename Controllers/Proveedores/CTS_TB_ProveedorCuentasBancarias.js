@@ -14,6 +14,7 @@
 import db from '../../DataBase/db.js';
 import { Op } from 'sequelize';
 import { registrarLog } from '../../Helpers/registrarLog.js';
+import { ValidationError } from 'sequelize';
 
 // Modelos
 import { ProveedorCuentasBancariasModel } from '../../Models/Proveedores/MD_TB_ProveedorCuentasBancarias.js';
@@ -91,36 +92,30 @@ export const CR_ProveedorCuenta_CTS = async (req, res) => {
       es_predeterminada: body.es_predeterminada || false
     });
 
-    // LOG (no crítico)
-    try {
-      const proveedor = await ProveedoresModel.findByPk(proveedorId);
-      const parts = [
-        `creó la cuenta bancaria "${show(
-          nueva.banco
-        )}" para el proveedor "${show(proveedor?.razon_social)}"`,
-        nueva.alias_cbu ? `Alias: ${show(nueva.alias_cbu)}` : '',
-        nueva.cbu ? `CBU: ${show(nueva.cbu)}` : '',
-        nueva.numero_cuenta ? `Número: ${show(nueva.numero_cuenta)}` : '',
-        nueva.titular ? `Titular: ${show(nueva.titular)}` : ''
-      ].filter(Boolean);
+    // LOG ...
+    // ...
 
-      await registrarLog(
-        req,
-        'proveedores',
-        'crear',
-        parts.join(' · '),
-        usuario_log_id || undefined
-      );
-    } catch (e) {
-      console.warn('[registrarLog cuentas crear] no crítico:', e.message);
-    }
-
-    res.json({
+    return res.json({
       message: 'Cuenta bancaria creada correctamente',
       cuenta: nueva
     });
   } catch (error) {
-    res.status(500).json({ mensajeError: error.message });
+    console.error('❌ Error en CR_ProveedorCuenta_CTS:', error);
+
+    // 👉 Caso 1: error de validación de Sequelize
+    if (
+      error instanceof ValidationError ||
+      error.name === 'SequelizeValidationError'
+    ) {
+      return res.status(400).json({
+        mensajeError:
+          error.errors?.[0]?.message ||
+          'Datos inválidos para la cuenta bancaria.'
+      });
+    }
+
+    // 👉 Caso genérico
+    return res.status(500).json({ mensajeError: error.message });
   }
 };
 

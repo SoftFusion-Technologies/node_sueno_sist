@@ -585,8 +585,6 @@ router.get(
   GET_Proveedor_Cheques_Resumen_CTS
 );
 
-
-
 import {
   OBRS_Proveedores_CTS,
   OBR_Proveedor_CTS,
@@ -803,7 +801,6 @@ import { OBRS_AllChequeMovimientos_CTS } from '../Controllers/Cheques/CTS_TB_Che
 // ✅ GLOBAL (sin cheque_id) — DEBE IR ANTES
 router.get('/cheques/movimientos', OBRS_AllChequeMovimientos_CTS);
 
-
 import {
   OBRS_ChequesPorChequera_CTS,
   OBRS_Cheques_CTS,
@@ -850,7 +847,6 @@ import {
   ER_ChequeImagen_CTS
 } from '../Controllers/Cheques/CTS_TB_ChequeImagenes.js';
 
-
 import {
   OBRS_ChequeImagenEventos_CTS,
   OBR_ChequeImagenEvento_CTS,
@@ -865,7 +861,6 @@ router.get('/cheques/:cheque_id/imagenes', OBRS_ChequeImagenes_CTS);
 
 // Descargar imagen (antes que la genérica)
 router.get('/cheques/:cheque_id/imagenes/:id/download', DWN_ChequeImagen_CTS);
-
 
 // Eventos (antes de la genérica de :id)
 router.get(
@@ -958,7 +953,6 @@ router.get('/resumen-caja/ventas', getVentasDetalle); // detalle de ventas (pagi
 import { getVentasDesbalanceadas } from '../Controllers/Analiticas/AuditoriaController.js';
 router.get('/auditoria/ventas-desbalanceadas', getVentasDesbalanceadas);
 
-
 // routes.js
 import {
   OBRS_ChequesUsos_CTS,
@@ -972,4 +966,194 @@ router.get('/cheques-usos/:id', OBR_ChequeUso_CTS);
 router.post('/cheques-usos/usar/:cheque_id', CR_ChequeUso_Usar_CTS);
 router.post('/cheques-usos/acreditar/:cheque_id', CR_ChequeUso_Acreditar_CTS);
 
+// -------------------------
+// MODULO DE COMPRAS INI - 02-11-2025 Benjamin Orellana
+// -------------------------
+import {
+  OBRS_ComprasDetalle_CTS, // GET    /compras-detalle?compra_id=...
+  OBR_CompraDetalle_CTS, // GET    /compras-detalle/:id
+  CR_CompraDetalle_Crear_CTS, // POST   /compras-detalle
+  UR_CompraDetalle_Actualizar_CTS, // PUT    /compras-detalle/:id
+  ER_CompraDetalle_Borrar_CTS, // DELETE /compras-detalle/:id
+  CR_ComprasDetalle_Reemplazar_CTS // POST   /compras-detalle/reemplazar
+} from '../Controllers/Compras/CTS_TB_ComprasDetalle.js';
+
+router.get('/compras-detalle', OBRS_ComprasDetalle_CTS); // lista por compra_id
+router.get('/compras-detalle/:id', OBR_CompraDetalle_CTS); // obtiene 1 detalle
+router.post('/compras-detalle', CR_CompraDetalle_Crear_CTS); // crea línea (compra borrador)
+router.put('/compras-detalle/:id', UR_CompraDetalle_Actualizar_CTS); // actualiza línea (compra borrador)
+router.delete('/compras-detalle/:id', ER_CompraDetalle_Borrar_CTS); // elimina línea (compra borrador)
+
+router.post('/compras-detalle/reemplazar', CR_ComprasDetalle_Reemplazar_CTS);
+
+import {
+  OBRS_Cxp_CTS, // GET    /cxp
+  OBR_Cxp_CTS, // GET    /cxp/:id
+  CR_Cxp_CrearManual_CTS, // POST   /cxp
+  UR_Cxp_ActualizarFechas_CTS, // PUT    /cxp/:id/fechas
+  UR_Cxp_RecalcularSaldo_CTS, // POST   /cxp/:id/recalcular
+  UR_Cxp_AjustarMonto_CTS, // PUT    /cxp/:id/monto
+  ER_Cxp_Borrar_CTS // DELETE /cxp/:id
+} from '../Controllers/Compras/CTS_TB_CuentasPagarProveedores.js';
+
+// Filtros: ?q=&proveedor_id=&estado=&desde_venc=YYYY-MM-DD&hasta_venc=YYYY-MM-DD&page=&pageSize=
+router.get('/compras/cxp', OBRS_Cxp_CTS);
+router.get('/compras/cxp/:id', OBR_Cxp_CTS);
+router.post('/compras/cxp', CR_Cxp_CrearManual_CTS);
+router.put('/compras/cxp/:id/fechas', UR_Cxp_ActualizarFechas_CTS);
+router.post('/compras/cxp/:id/recalcular', UR_Cxp_RecalcularSaldo_CTS);
+router.put('/compras/cxp/:id/monto', UR_Cxp_AjustarMonto_CTS);
+router.delete('/compras/cxp/:id', ER_Cxp_Borrar_CTS);
+
+import {
+  OBRS_Compras_CTS, // GET   /compras
+  OBR_Compra_CTS, // GET   /compras/:id
+  CR_Compra_CrearBorrador_CTS, // POST  /compras
+  UR_Compra_ActualizarBorrador_CTS, // PUT   /compras/:id
+  CR_Compra_Confirmar_CTS, // POST  /compras/:id/confirmar
+  CR_Compra_Anular_CTS, // POST  /compras/:id/anular
+  ER_Compra_BorrarBorrador_CTS // DELETE /compras/:id
+} from '../Controllers/Compras/CTS_TB_Compras.js';
+
+router.get('/compras', OBRS_Compras_CTS);
+router.get('/compras/:id', OBR_Compra_CTS);
+router.post('/compras', CR_Compra_CrearBorrador_CTS);
+router.put('/compras/:id', UR_Compra_ActualizarBorrador_CTS);
+router.post('/compras/:id/confirmar', CR_Compra_Confirmar_CTS);
+router.post('/compras/:id/anular', CR_Compra_Anular_CTS);
+router.delete('/compras/:id', ER_Compra_BorrarBorrador_CTS);
+
+import {
+  OBRS_PagosProv_CTS, // GET    /pagos-proveedor
+  OBR_PagoProv_CTS, // GET    /pagos-proveedor/:id
+  CR_PagoProv_Crear_CTS, // POST   /pagos-proveedor
+  UR_PagoProv_Aplicaciones_CTS, // POST   /pagos-proveedor/:id/aplicar
+  ER_PagoProv_Desaplicar_CTS, // DELETE /pagos-proveedor/aplicacion/:pago_detalle_id
+  ER_PagoProv_Anular_CTS,
+  ER_PagoProv_Borrar_CTS // DELETE /pagos-proveedor/:id
+} from '../Controllers/Compras/CTS_TB_PagosProveedor.js';
+
+router.get('/pagos-proveedor', OBRS_PagosProv_CTS);
+router.get('/pagos-proveedor/:id', OBR_PagoProv_CTS);
+router.post('/pagos-proveedor', CR_PagoProv_Crear_CTS);
+router.post('/pagos-proveedor/:pago_id/aplicar', CR_PagoProv_Crear_CTS);
+
+// Para agregar nuevas imputaciones a un pago existente
+router.post('/pagos-proveedor/:id/aplicar', UR_PagoProv_Aplicaciones_CTS);
+
+// Para remover UNA imputación puntual
+router.delete(
+  '/pagos-proveedor/aplicacion/:pago_detalle_id',
+  ER_PagoProv_Desaplicar_CTS
+);
+
+// Anular un pago completo (reversar caja/banco/teso y CxP)
+router.post('/pagos-proveedor/:id/anular', ER_PagoProv_Anular_CTS);
+
+// Para borrar la cabecera (solo si no tiene aplicaciones)
+router.delete('/pagos-proveedor/:id', ER_PagoProv_Borrar_CTS);
+
+import {
+  OBRS_PagoProvDet_CTS, // GET    /pagos-proveedor-detalle
+  OBR_PagoProvDet_CTS, // GET    /pagos-proveedor-detalle/:id
+  CR_PagoProvDet_Crear_CTS, // POST   /pagos-proveedor-detalle
+  UR_PagoProvDet_Actualizar_CTS, // PUT    /pagos-proveedor-detalle/:id
+  ER_PagoProvDet_Borrar_CTS // DELETE /pagos-proveedor-detalle/:id
+} from '../Controllers/Compras/CTS_TB_PagoProveedorDetalle.js';
+
+router.get('/pagos-proveedor-detalle', OBRS_PagoProvDet_CTS);
+router.get('/pagos-proveedor-detalle/:id', OBR_PagoProvDet_CTS);
+router.post('/pagos-proveedor-detalle', CR_PagoProvDet_Crear_CTS);
+router.put('/pagos-proveedor-detalle/:id', UR_PagoProvDet_Actualizar_CTS);
+router.delete('/pagos-proveedor-detalle/:id', ER_PagoProvDet_Borrar_CTS);
+
+import {
+  OBRS_StockMov_CTS, // GET    /stock-movimientos
+  OBR_StockMov_CTS, // GET    /stock-movimientos/:id
+  CR_StockMov_Crear_CTS, // POST   /stock-movimientos
+  UR_StockMov_ActualizarNotas_CTS, // PUT    /stock-movimientos/:id
+  CR_StockMov_Revertir_CTS, // POST   /stock-movimientos/:id/revertir
+  ER_StockMov_Borrar_CTS // DELETE /stock-movimientos/:id (405)
+} from '../Controllers/Compras/CTS_TB_StockMovimientos.js';
+
+router.get('/stock-movimientos', OBRS_StockMov_CTS);
+router.get('/stock-movimientos/:id', OBR_StockMov_CTS);
+router.post('/stock-movimientos', CR_StockMov_Crear_CTS);
+router.put('/stock-movimientos/:id', UR_StockMov_ActualizarNotas_CTS);
+router.post('/stock-movimientos/:id/revertir', CR_StockMov_Revertir_CTS);
+router.delete('/stock-movimientos/:id', ER_StockMov_Borrar_CTS);
+
+import {
+  OBRS_ImpuestosConfig_CTS, // GET    /impuestos-config
+  OBR_ImpuestoConfig_CTS, // GET    /impuestos-config/:id
+  OBR_ImpuestoConfig_ByCodigo_CTS, // GET    /impuestos-config/by-codigo/:codigo
+  CR_ImpuestoConfig_Crear_CTS, // POST   /impuestos-config
+  UR_ImpuestoConfig_Actualizar_CTS, // PUT    /impuestos-config/:id
+  UR_ImpuestoConfig_SetActivo_CTS, // PATCH  /impuestos-config/:id/activo   {activo:true|false}
+  ER_ImpuestoConfig_BajaLogica_CTS // DELETE /impuestos-config/:id          (baja lógica)
+} from '../Controllers/Compras/CTS_TB_ImpuestosConfig.js';
+
+router.get('/impuestos-config', OBRS_ImpuestosConfig_CTS);
+router.get('/impuestos-config/:id', OBR_ImpuestoConfig_CTS);
+router.get(
+  '/impuestos-config/by-codigo/:codigo',
+  OBR_ImpuestoConfig_ByCodigo_CTS
+);
+router.post('/impuestos-config', CR_ImpuestoConfig_Crear_CTS);
+router.put('/impuestos-config/:id', UR_ImpuestoConfig_Actualizar_CTS);
+router.patch('/impuestos-config/:id/activo', UR_ImpuestoConfig_SetActivo_CTS);
+router.delete('/impuestos-config/:id', ER_ImpuestoConfig_BajaLogica_CTS);
+
+import {
+  OBRS_ComprasImpuestos_CTS, // GET    /compras/:compra_id/impuestos   (o /compras-impuestos?compra_id=)
+  OBR_CompraImpuesto_CTS, // GET    /compras-impuestos/:id
+  CR_CompraImpuesto_Crear_CTS, // POST   /compras/:compra_id/impuestos
+  UR_CompraImpuesto_Actualizar_CTS, // PUT    /compras-impuestos/:id
+  ER_CompraImpuesto_Borrar_CTS // DELETE /compras-impuestos/:id
+} from '../Controllers/Compras/CTS_TB_ComprasImpuestos.js';
+
+// Anidar por compra (UX más clara)
+router.get('/compras/:compra_id/impuestos', OBRS_ComprasImpuestos_CTS);
+router.post('/compras/:compra_id/impuestos', CR_CompraImpuesto_Crear_CTS);
+
+// Acceso directo por id
+router.get('/compras-impuestos/:id', OBR_CompraImpuesto_CTS);
+router.put('/compras-impuestos/:id', UR_CompraImpuesto_Actualizar_CTS);
+router.delete('/compras-impuestos/:id', ER_CompraImpuesto_Borrar_CTS);
+
+import {
+  OBRS_PagosProveedorMedios_CTS, // GET    /pagos-proveedor/:pago_id/medios   (o /pagos-proveedor-medios?pago_id=)
+  OBR_PagoProveedorMedio_CTS, // GET    /pagos-proveedor-medios/:id
+  CR_PagoProveedorMedio_Crear_CTS, // POST   /pagos-proveedor/:pago_id/medios
+  UR_PagoProveedorMedio_Actualizar_CTS, // PUT    /pagos-proveedor-medios/:id
+  ER_PagoProveedorMedio_Borrar_CTS, // DELETE /pagos-proveedor-medios/:id
+  OBR_PagosProveedorMedios_Resumen_CTS, // GET    /pagos-proveedor/:pago_id/medios/resumen
+  CR_PagosProveedorMedios_Reconciliar_CTS // POST   /pagos-proveedor/:pago_id/medios/reconciliar
+} from '../Controllers/Compras/CTS_TB_PagosProveedorMedios.js';
+
+// Listado por pago (anidado)
+router.get('/pagos-proveedor/:pago_id/medios', OBRS_PagosProveedorMedios_CTS);
+router.post(
+  '/pagos-proveedor/:pago_id/medios',
+  CR_PagoProveedorMedio_Crear_CTS
+);
+
+// Operaciones por id
+router.get('/pagos-proveedor-medios/:id', OBR_PagoProveedorMedio_CTS);
+router.put('/pagos-proveedor-medios/:id', UR_PagoProveedorMedio_Actualizar_CTS);
+router.delete('/pagos-proveedor-medios/:id', ER_PagoProveedorMedio_Borrar_CTS);
+
+// Utilería
+router.get(
+  '/pagos-proveedor/:pago_id/medios/resumen',
+  OBR_PagosProveedorMedios_Resumen_CTS
+);
+router.post(
+  '/pagos-proveedor/:pago_id/medios/reconciliar',
+  CR_PagosProveedorMedios_Reconciliar_CTS
+);
+
+// -------------------------
+// MODULO DE COMPRAS FIN - 02-11-2025 Benjamin Orellana
+// -------------------------
 export default router;

@@ -77,3 +77,85 @@ ProductoProveedorHistorialCostosModel.belongsTo(ProductoProveedorModel, {
   foreignKey: 'producto_proveedor_id',
   as: 'productoProveedor'
 });
+
+export async function onCompraConfirmada_Proveedor(compra, options = {}) {
+  const { transaction } = options;
+  const {
+    id: compraId,
+    proveedor_id,
+    fecha,
+    total,
+    moneda,
+    detalles = []
+  } = compra;
+
+  if (!proveedor_id) return;
+
+  // 1) Metadata del proveedor
+  try {
+    await ProveedoresModel.update(
+      {
+        fecha_ultima_compra: fecha,
+        monto_ultima_compra: total // en la moneda de la compra (moneda campo aparte)
+        // compras_acumuladas: db.literal('COALESCE(compras_acumuladas,0) + 1') // si algún día lo agregás
+      },
+      { where: { id: proveedor_id }, transaction }
+    );
+  } catch (e) {
+    console.warn('[onCompraConfirmada_Proveedor] meta proveedor:', e.message);
+  }
+
+  // 2) Vincular productos ↔ proveedor + historial de costos (queda igual que antes)
+  for (const d of detalles) {
+    if (!d.producto_id) continue;
+
+    const costoNeto = Number(d.costo_unit_neto ?? 0);
+    const monedaLinea = moneda || 'ARS';
+    const alicuotaIva = d.alicuota_iva ?? 21;
+    const descPct = d.descuento_porcentaje ?? 0;
+
+    const [pp] = await ProductoProveedorModel.findOrCreate({
+      where: { producto_id: d.producto_id, proveedor_id },
+      defaults: {
+        producto_id: d.producto_id,
+        proveedor_id,
+        costo_neto: costoNeto,
+        moneda: monedaLinea,
+        alicuota_iva: alicuotaIva,
+        descuento_porcentaje: descPct,
+        vigente: true
+      },
+      transaction
+    });
+
+    const costoAnterior = Number(pp.costo_neto ?? 0);
+    const changed =
+      costoNeto !== costoAnterior ||
+      pp.moneda !== monedaLinea ||
+      Number(pp.alicuota_iva ?? 0) !== Number(alicuotaIva ?? 0) ||
+      Number(pp.descuento_porcentaje ?? 0) !== Number(descPct ?? 0);
+
+    if (!changed) continue;
+
+    pp.costo_neto = costoNeto;
+    pp.moneda = monedaLinea;
+    pp.alicuota_iva = alicuotaIva;
+    pp.descuento_porcentaje = descPct;
+    pp.vigente = true;
+
+    await pp.save({ transaction });
+
+    await ProductoProveedorHistorialCostosModel.create(
+      {
+        producto_proveedor_id: pp.id,
+        costo_neto: costoNeto,
+        moneda: monedaLinea,
+        alicuota_iva: alicuotaIva,
+        descuento_porcentaje: descPct,
+        motivo: 'Actualización por compra confirmada',
+        observaciones: `Compra ID=${compraId}`
+      },
+      { transaction }
+    );
+  }
+}

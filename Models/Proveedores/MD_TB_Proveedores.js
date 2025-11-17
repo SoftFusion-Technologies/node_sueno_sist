@@ -242,6 +242,13 @@ export const ProveedoresModel = db.define(
     fecha_ultima_compra: {
       type: DataTypes.DATE,
       allowNull: true
+    },
+    monto_ultima_compra: {
+      type: DataTypes.DECIMAL(18, 2),
+      allowNull: true,
+      validate: {
+        min: 0
+      }
     }
   },
   {
