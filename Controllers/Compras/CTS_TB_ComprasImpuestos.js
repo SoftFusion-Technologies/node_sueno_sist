@@ -93,34 +93,98 @@ async function safeRecalcularTotalesCompra(compra_id, t) {
 export const OBRS_ComprasImpuestos_CTS = async (req, res) => {
   try {
     const compra_id = req.params?.compra_id || req.query?.compra_id;
-    const { tipo, codigo, page = 1, pageSize = 50 } = req.query || {};
+    const {
+      tipo,
+      codigo,
+      fecha_desde,
+      fecha_hasta,
+      q_proveedor,
+      estado,
+      page = 1,
+      pageSize = 50
+    } = req.query || {};
 
-    const where = {};
-    if (compra_id) where.compra_id = compra_id;
-    if (tipo) where.tipo = tipo;
-    if (codigo) where.codigo = normCodigo(codigo);
+    const whereImp = {};
+    if (compra_id) whereImp.compra_id = compra_id;
+    if (tipo) whereImp.tipo = tipo;
+    if (codigo) whereImp.codigo = normCodigo(codigo);
 
-    const offset = (Number(page) - 1) * Number(pageSize);
+    // ---------- Filtros sobre CABECERA ----------
+    const whereCompra = {};
+    if (fecha_desde || fecha_hasta) {
+      whereCompra.fecha = {};
+      if (fecha_desde) {
+        whereCompra.fecha[Op.gte] = `${fecha_desde} 00:00:00`;
+      }
+      if (fecha_hasta) {
+        whereCompra.fecha[Op.lte] = `${fecha_hasta} 23:59:59`;
+      }
+    }
+
+    if (estado) {
+      whereCompra.estado = estado; // confirmada, borrador, anulada, etc.
+    }
+
+    // ---------- Filtro PROVEEDOR ----------
+    const whereProveedor = {};
+    const tieneFiltroProveedor =
+      q_proveedor && String(q_proveedor).trim().length > 0;
+
+    if (tieneFiltroProveedor) {
+      const v = `%${String(q_proveedor).trim()}%`;
+      whereProveedor[Op.or] = [
+        { razon_social: { [Op.like]: v } },
+        { nombre_fantasia: { [Op.like]: v } },
+        { cuit: { [Op.like]: v } }
+      ];
+    }
+
+    const limit = Number(pageSize) || 50;
+    const offset = (Number(page) - 1) * limit;
 
     const { rows, count } = await CompraImpuestoModel.findAndCountAll({
-      where,
-      limit: Number(pageSize),
+      where: whereImp,
+      limit,
       offset,
-      order: [['id', 'ASC']]
+      order: [['id', 'ASC']],
+      include: [
+        {
+          association: 'compra',
+          required: true,
+          where: Object.keys(whereCompra).length ? whereCompra : undefined,
+          include: [
+            {
+              association: 'proveedor',
+              // 🔑 ACA ESTÁ LA CLAVE:
+              // - si NO hay filtro → LEFT JOIN (required:false)
+              // - si HAY filtro → INNER JOIN (required:true)
+              required: tieneFiltroProveedor,
+              where: tieneFiltroProveedor ? whereProveedor : undefined
+            }
+          ]
+        }
+      ]
     });
 
     res.json({
       ok: true,
       data: rows,
-      meta: { total: count, page: Number(page), pageSize: Number(pageSize) }
+      meta: {
+        total: count,
+        page: Number(page),
+        pageSize: limit
+      }
     });
   } catch (err) {
     console.error('[OBRS_ComprasImpuestos_CTS] error:', err);
-    res
-      .status(500)
-      .json({ ok: false, error: 'Error listando impuestos de la compra' });
+    res.status(500).json({
+      ok: false,
+      error: 'Error listando impuestos de la compra'
+    });
   }
 };
+
+
 
 /* =====================================================
  * GET /compras-impuestos/:id

@@ -27,19 +27,29 @@ import '../../Models/Compras/compras_relaciones.js';
 
 // ===== MODELOS CORE (opcional/soporte) =====
 import { ProveedoresModel } from '../../Models/Proveedores/MD_TB_Proveedores.js'; // dias_credito, etc.
-import { StockModel } from '../../Models/Stock/MD_TB_Stock.js'; // upsert de saldo
 import { TesoFlujoModel } from '../../Models/Tesoreria/MD_TB_TesoFlujo.js'; // proyección de egreso
+
+import MD_TB_Stock from '../../Models/Stock/MD_TB_Stock.js';
+const { StockModel } = MD_TB_Stock;
+
+import { ProductosModel } from '../../Models/Stock/MD_TB_Productos.js';
+import { LocalesModel } from '../../Models/Stock/MD_TB_Locales.js';
+import { LugaresModel } from '../../Models/Stock/MD_TB_Lugares.js';
+import { EstadosModel } from '../../Models/Stock/MD_TB_Estados.js';
 
 import { onCompraConfirmada_Proveedor } from '../../Models/Proveedores/relacionesProveedor.js';
 
 // Logs helper
 import { registrarLog } from '../../Helpers/registrarLog.js';
 
-// Util numérico básico
-const toNum = (x) => Number(x ?? 0) || 0;
-const round2 = (n) => Math.round((toNum(n) + Number.EPSILON) * 100) / 100;
-const round4 = (n) => Math.round((toNum(n) + Number.EPSILON) * 10000) / 10000;
+const toNum = (v, def = 0) => {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : def;
+};
 
+const round2 = (n) => Math.round((toNum(n) + Number.EPSILON) * 100) / 100;
+
+const round4 = (n) => Math.round((toNum(n) + Number.EPSILON) * 10000) / 10000;
 // Instancia de sequelize
 const sequelize = CompraModel.sequelize;
 
@@ -70,56 +80,141 @@ function calcularTotalLinea({
   return round2(base + iva + otros);
 }
 
-function recomputarTotales(detalles = [], impuestosDoc = []) {
+// ------------------------------------------------------
+// Helper: recomputarTotales(detalles, impuestos)
+//  - Detalles: calcula neto + IVA + otros_impuestos de cada línea
+//  - Impuestos: usa compras_impuestos (IVA config / percep / retenc)
+// ------------------------------------------------------
+const recomputarTotales = (detalles = [], impuestos = [], opciones = {}) => {
+  const {
+    percepciones_manual = 0, // para modo legacy sin compras_impuestos
+    retenciones_manual = 0
+  } = opciones || {};
+
   let subtotal_neto = 0;
   let iva_total = 0;
+  let otros_det_impuestos = 0; // suma de otros_impuestos por línea
+
+  // ===== 1) Recorrer DETALLES =====
+  for (const d of detalles) {
+    const cant = toNum(d.cantidad, 0);
+    const aliIva = toNum(d.alicuota_iva, 0); // ej: 21
+    const descPct = toNum(d.descuento_porcentaje, 0); // ej: 10
+    const otrosImpLinea = toNum(d.otros_impuestos, 0); // total por línea
+    const incIva = !!d.inc_iva; // boolean
+    const costoUnit = toNum(d.costo_unit_neto, 0); // valor que viene del form
+
+    if (cant <= 0 || costoUnit < 0) continue;
+
+    let netoUnit = 0;
+    let ivaUnit = 0;
+
+    // 1a) Separar neto / IVA según inc_iva (igual que en el modal)
+    if (incIva && aliIva > 0) {
+      const factor = 1 + aliIva / 100;
+      netoUnit = costoUnit / factor;
+      ivaUnit = costoUnit - netoUnit;
+    } else {
+      netoUnit = costoUnit;
+      ivaUnit = (costoUnit * aliIva) / 100;
+    }
+
+    // 1b) Aplicar descuento proporcional
+    if (descPct > 0 && descPct < 100) {
+      const factorDesc = (100 - descPct) / 100;
+      netoUnit *= factorDesc;
+      ivaUnit *= factorDesc;
+    }
+
+    // 1c) Acumular por línea
+    const netoLinea = netoUnit * cant;
+    const ivaLinea = ivaUnit * cant;
+
+    subtotal_neto += netoLinea;
+    iva_total += ivaLinea;
+    otros_det_impuestos += otrosImpLinea;
+
+    // Si tu detalle tiene columna total_linea, la dejamos seteada
+    d.total_linea = round2(netoLinea + ivaLinea + otrosImpLinea);
+  }
+
+  // Total de las líneas (lo mismo que s.total_detalles en el modal)
+  const total_detalles = subtotal_neto + iva_total + otros_det_impuestos;
+
+  // ===== 2) IMPUESTOS DE CABECERA (compras_impuestos) =====
   let percepciones_total = 0;
   let retenciones_total = 0;
-  let total = 0;
+  let otros_impuestos_config = 0; // IVA105, otros impuestos “globales”
 
-  for (const d of detalles) {
-    const total_linea = calcularTotalLinea(d);
-    d.total_linea = total_linea; // persistir coherente
+  if (Array.isArray(impuestos) && impuestos.length) {
+    for (const imp of impuestos) {
+      const tipo = String(imp.tipo || '').toLowerCase();
+      const monto = toNum(imp.monto, 0);
 
-    const qty = Math.max(1, parseInt(d.cantidad, 10));
-    const costo = toNum(d.costo_unit_neto);
-    const desc = toNum(d.descuento_porcentaje);
-    const base = qty * costo * (1 - desc / 100);
-    const iva = d.inc_iva ? 0 : base * (toNum(d.alicuota_iva) / 100);
-
-    subtotal_neto += base;
-    iva_total += iva;
-    total += total_linea;
-  }
-
-  for (const i of impuestosDoc) {
-    const tipo = (i.tipo || '').toUpperCase();
-    const monto = toNum(i.monto);
-    if (tipo === 'IVA') {
-      iva_total += monto; // si carga desglose adicional
-    } else if (tipo === 'PERCEPCION') {
-      percepciones_total += monto;
-    } else if (tipo === 'RETENCION') {
-      retenciones_total += monto;
-    } else {
-      total += monto; // otros
+      if (tipo === 'percepcion') {
+        percepciones_total += monto;
+      } else if (tipo === 'retencion') {
+        retenciones_total += monto;
+      } else if (tipo === 'iva' || tipo === 'otro') {
+        // IVA configurado (IVA105, etc) u otros impuestos globales
+        otros_impuestos_config += monto;
+      }
     }
+  } else {
+    // MODO LEGACY:
+    // si todavía no mandás array de impuestos, usa lo que venga en el body
+    percepciones_total = toNum(percepciones_manual, 0);
+    retenciones_total = toNum(retenciones_manual, 0);
   }
 
-  subtotal_neto = round2(subtotal_neto);
-  iva_total = round2(iva_total);
-  percepciones_total = round2(percepciones_total);
-  retenciones_total = round2(retenciones_total);
-  total = round2(total + percepciones_total + retenciones_total);
+  // ===== 3) Total de la COMPRA (exactamente como el modal) =====
+  // total = total_detalles + otros_impuestos_config + percepciones - retenciones
+  const total =
+    total_detalles +
+    otros_impuestos_config +
+    percepciones_total -
+    retenciones_total;
 
   return {
-    subtotal_neto,
-    iva_total,
-    percepciones_total,
-    retenciones_total,
-    total
+    subtotal_neto: round2(subtotal_neto),
+    iva_total: round2(iva_total),
+    percepciones_total: round2(percepciones_total),
+    retenciones_total: round2(retenciones_total),
+    total: round2(total)
   };
-}
+};
+
+// Construye un SKU para la combinación producto+local+lugar+estado
+const buildSkuForCompraStock = async (
+  producto_id,
+  local_id,
+  lugar_id,
+  estado_id,
+  transaction
+) => {
+  const producto = await ProductosModel.findByPk(producto_id, { transaction });
+
+  const baseSku = (producto?.codigo_sku || '').trim() || `SKU-${producto_id}`;
+
+  const [local, lugar, estado] = await Promise.all([
+    LocalesModel.findByPk(local_id, {
+      attributes: ['codigo', 'nombre'],
+      transaction
+    }),
+    LugaresModel.findByPk(lugar_id, { attributes: ['nombre'], transaction }),
+    EstadosModel.findByPk(estado_id, { attributes: ['nombre'], transaction })
+  ]);
+
+  const parts = [baseSku];
+
+  if (local?.codigo) parts.push(local.codigo);
+  else if (local?.nombre) parts.push(local.nombre);
+
+  if (lugar?.nombre) parts.push(lugar.nombre);
+  if (estado?.nombre) parts.push(estado.nombre);
+
+  return parts.join('-').replace(/\s+/g, '').toUpperCase().slice(0, 60); // por si acaso
+};
 
 /* ------------------------------------------------------
  * Listar / Obtener compras
@@ -232,7 +327,10 @@ export const CR_Compra_CrearBorrador_CTS = async (req, res) => {
       nro_comprobante = null,
       observaciones = null,
       detalles = [],
-      impuestos = []
+      impuestos = [],
+      // nuevos (por si viene del formulario viejo sin tabla de impuestos)
+      percepciones_total: percepManual = 0,
+      retenciones_total: retManual = 0
     } = req.body || {};
 
     // === Validación MANUAL de punto_venta antes de tocar Sequelize ===
@@ -309,7 +407,10 @@ export const CR_Compra_CrearBorrador_CTS = async (req, res) => {
     if (!Array.isArray(detalles) || detalles.length === 0)
       return res.status(400).json({ ok: false, error: 'Faltan detalles' });
 
-    const tot = recomputarTotales(detalles, impuestos);
+    const tot = recomputarTotales(detalles, impuestos, {
+      percepciones_manual: percepManual,
+      retenciones_manual: retManual
+    });
 
     const compra = await CompraModel.create(
       {
@@ -428,6 +529,7 @@ export const UR_Compra_ActualizarBorrador_CTS = async (req, res) => {
   try {
     const usuario_id = getUsuarioId(req);
     const { id } = req.params;
+
     const {
       canal,
       proveedor_id,
@@ -441,10 +543,12 @@ export const UR_Compra_ActualizarBorrador_CTS = async (req, res) => {
       nro_comprobante,
       observaciones,
       detalles = [],
-      impuestos = []
+      impuestos = [],
+      percepciones_total: percepManual = 0,
+      retenciones_total: retManual = 0
     } = req.body || {};
 
-    // Buscar compra con lock
+    // ===== Buscar compra con lock =====
     const compra = await CompraModel.findByPk(id, {
       include: [
         { model: CompraDetalleModel, as: 'detalles' },
@@ -467,7 +571,22 @@ export const UR_Compra_ActualizarBorrador_CTS = async (req, res) => {
       });
     }
 
-    // ===== Validación / normalización de punto_venta (similar al CR) =====
+    // ===== Proveedor final (nuevo o el que ya tiene) =====
+    const proveedorFinal = proveedor_id ?? compra.proveedor_id;
+    if (!proveedorFinal) {
+      await t.rollback();
+      return res.status(400).json({ ok: false, error: 'Falta proveedor_id' });
+    }
+
+    // ===== Validación detalles =====
+    if (!Array.isArray(detalles) || detalles.length === 0) {
+      await t.rollback();
+      return res
+        .status(400)
+        .json({ ok: false, error: 'Faltan detalles de la compra' });
+    }
+
+    // ===== Validación / normalización de punto_venta (igual que en CR) =====
     // Punto de partida: el valor actual en BD
     let pv = compra.punto_venta;
 
@@ -493,7 +612,7 @@ export const UR_Compra_ActualizarBorrador_CTS = async (req, res) => {
               valor_recibido: bodyPv,
               rawPv,
               compra_id: compra.id,
-              proveedor_id: compra.proveedor_id,
+              proveedor_id: proveedorFinal,
               tipo_comprobante: tipo_comprobante ?? compra.tipo_comprobante
             }
           );
@@ -515,7 +634,7 @@ export const UR_Compra_ActualizarBorrador_CTS = async (req, res) => {
     }
     // Si NO vino en el body, pv queda igual que compra.punto_venta
 
-    // ===== Validación / normalización de nro_comprobante =====
+    // ===== Validación / normalización de nro_comprobante (igual que en CR) =====
     let nroFinal = compra.nro_comprobante;
 
     if (Object.prototype.hasOwnProperty.call(req.body, 'nro_comprobante')) {
@@ -539,7 +658,7 @@ export const UR_Compra_ActualizarBorrador_CTS = async (req, res) => {
               valor_recibido: bodyNro,
               rawNro,
               compra_id: compra.id,
-              proveedor_id: compra.proveedor_id,
+              proveedor_id: proveedorFinal,
               tipo_comprobante: tipo_comprobante ?? compra.tipo_comprobante
             }
           );
@@ -558,20 +677,16 @@ export const UR_Compra_ActualizarBorrador_CTS = async (req, res) => {
       }
     }
 
-    // ===== Validaciones de negocio básicas =====
-    if (!Array.isArray(detalles) || detalles.length === 0) {
-      await t.rollback();
-      return res
-        .status(400)
-        .json({ ok: false, error: 'Faltan detalles de la compra' });
-    }
-
-    const tot = recomputarTotales(detalles, impuestos);
+    // ===== Recalcular totales con la misma lógica que el CR =====
+    const tot = recomputarTotales(detalles, impuestos, {
+      percepciones_manual: percepManual,
+      retenciones_manual: retManual
+    });
 
     // ===== Actualizar cabecera =====
     Object.assign(compra, {
       canal: canal ?? compra.canal,
-      proveedor_id: proveedor_id ?? compra.proveedor_id,
+      proveedor_id: proveedorFinal,
       local_id: local_id ?? compra.local_id,
       fecha: fecha ?? compra.fecha,
       condicion_compra: condicion_compra ?? compra.condicion_compra,
@@ -604,16 +719,48 @@ export const UR_Compra_ActualizarBorrador_CTS = async (req, res) => {
     for (const d of detalles) d.compra_id = compra.id;
     for (const i of impuestos) i.compra_id = compra.id;
 
-    if (detalles?.length)
+    if (detalles?.length) {
       await CompraDetalleModel.bulkCreate(detalles, { transaction: t });
-    if (impuestos?.length)
+    }
+    if (impuestos?.length) {
       await CompraImpuestoModel.bulkCreate(impuestos, { transaction: t });
+    }
+
+    // ===== Log más descriptivo (igual estilo que en CR) =====
+    const formatCurrency = (monto) =>
+      new Intl.NumberFormat('es-AR', {
+        style: 'currency',
+        currency: compra.moneda || 'ARS',
+        minimumFractionDigits: 2
+      }).format(Number(monto || 0));
+
+    const pvLog =
+      compra.punto_venta != null && compra.punto_venta !== undefined
+        ? String(compra.punto_venta).padStart(4, '0')
+        : 'S/PV';
+
+    const nroLog =
+      compra.nro_comprobante != null && compra.nro_comprobante !== undefined
+        ? String(compra.nro_comprobante).padStart(8, '0')
+        : 'S/NRO';
+
+    const logDescripcion = [
+      'actualizó borrador de compra',
+      `ID=${compra.id}`,
+      `ProveedorID=${proveedorFinal}`,
+      `Canal=${compra.canal}`,
+      `Condición=${compra.condicion_compra}`,
+      `Comprobante=${compra.tipo_comprobante} ${pvLog}-${nroLog}`,
+      `Total=${formatCurrency(tot.total)}`,
+      `Ítems=${detalles?.length || 0}`,
+      `Impuestos=${impuestos?.length || 0}`
+    ].join(' | ');
 
     await registrarLog(
       req,
       'compras',
       'actualizar',
-      `borrador — compra_id=${compra.id}`,
+      logDescripcion,
       usuario_id
     ).catch(() => {});
 
@@ -771,23 +918,51 @@ export const CR_Compra_Confirmar_CTS = async (req, res) => {
         movimientos.push(mov);
 
         // upsert saldo sólo si destino definido (UNIQUE incluye lugar_id, estado_id)
+        // upsert saldo sólo si destino definido (UNIQUE incluye lugar_id, estado_id)
         if (
           StockModel &&
           d.producto_id &&
           lugar_id !== null &&
           estado_id !== null
         ) {
+          const deltaCant = Number(d.cantidad) || 0;
+
+          // 1) Armamos SKU para esta combinación
+          const sku = await buildSkuForCompraStock(
+            d.producto_id,
+            finalLocalId,
+            lugar_id,
+            estado_id,
+            t
+          );
+
+          // 2) Insert / update con SKU
           await StockModel.sequelize.query(
-            `INSERT INTO stock (producto_id, local_id, lugar_id, estado_id, cantidad, codigo_sku)
-             VALUES (?, ?, ?, ?, ?, NULL)
-             ON DUPLICATE KEY UPDATE cantidad = GREATEST(0, cantidad + VALUES(cantidad))`,
+            `INSERT INTO stock (
+        producto_id,
+        local_id,
+        lugar_id,
+        estado_id,
+        cantidad,
+        codigo_sku
+     )
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON DUPLICATE KEY UPDATE
+       cantidad   = GREATEST(0, cantidad + VALUES(cantidad)),
+       -- si ya existía registro pero sin SKU, lo completamos ahora
+       codigo_sku = IF(
+         codigo_sku IS NULL OR codigo_sku = '',
+         VALUES(codigo_sku),
+         codigo_sku
+       )`,
             {
               replacements: [
                 d.producto_id,
                 finalLocalId,
                 lugar_id,
                 estado_id,
-                Number(d.cantidad) || 0
+                deltaCant,
+                sku
               ],
               transaction: t
             }
@@ -800,7 +975,7 @@ export const CR_Compra_Confirmar_CTS = async (req, res) => {
     await compra.save({ transaction: t });
 
     // Proyección en Tesorería (egreso futuro)
-    let tesoFlujo = null; // 👈 agregamos esto
+    let tesoFlujo = null;
     if (TesoFlujoModel) {
       tesoFlujo = await TesoFlujoModel.create(
         {

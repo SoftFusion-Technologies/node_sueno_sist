@@ -1112,6 +1112,8 @@ import {
   ER_CompraImpuesto_Borrar_CTS // DELETE /compras-impuestos/:id
 } from '../Controllers/Compras/CTS_TB_ComprasImpuestos.js';
 
+// Listado global para el dashboard /dashboard/compras/impuestos
+router.get('/compras-impuestos', OBRS_ComprasImpuestos_CTS);
 // Anidar por compra (UX más clara)
 router.get('/compras/:compra_id/impuestos', OBRS_ComprasImpuestos_CTS);
 router.post('/compras/:compra_id/impuestos', CR_CompraImpuesto_Crear_CTS);

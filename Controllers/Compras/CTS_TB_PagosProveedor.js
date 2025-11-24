@@ -33,7 +33,6 @@ import { CxpProveedorModel } from '../../Models/Compras/MD_TB_CuentasPagarProvee
 import { CompraModel } from '../../Models/Compras/MD_TB_Compras.js';
 import { ProveedoresModel } from '../../Models/Proveedores/MD_TB_Proveedores.js';
 import { MediosPagoModel } from '../../Models/Ventas/MD_TB_MediosPago.js';
-import { ChequeModel } from '../../Models/Cheques/MD_TB_Cheques.js';
 import { TesoFlujoModel } from '../../Models/Tesoreria/MD_TB_TesoFlujo.js';
 
 import { CajaModel } from '../../Models/Ventas/MD_TB_Caja.js';
@@ -44,6 +43,18 @@ import { getUid } from '../../Utils/getUid.js';
 
 import { BancoMovimientoModel } from '../../Models/Bancos/MD_TB_BancoMovimientos.js';
 
+// Models de cheques
+import { ChequeModel } from '../../Models/Cheques/MD_TB_Cheques.js';
+import { ChequeMovimientoModel } from '../../Models/Cheques/MD_TB_ChequeMovimientos.js';
+
+// Helper que ya usás en cheques (ajustá ruta)
+// Borrar proyección de flujo del cheque
+const deleteFlujoCheque = async ({ t, chequeId }) => {
+  await TesoFlujoModel.destroy({
+    where: { origen_tipo: 'cheque', origen_id: chequeId },
+    transaction: t
+  });
+};
 const sequelize = PagoProveedorModel.sequelize;
 
 // ===== Helpers numéricos =====
@@ -296,6 +307,126 @@ export const OBR_PagoProv_CTS = async (req, res) => {
  *   aplicaciones?: [{ compra_id, monto_aplicado }]
  * }
  * ===================================================== */
+
+// ------------------------------------------------------
+// Helper: aplicar cheques usados en un pago a proveedor
+// ------------------------------------------------------
+const aplicarChequesDePagoAProveedor = async ({
+  req,
+  pago,
+  medios,
+  proveedor_id,
+  aplicaciones,
+  transaction,
+  usuario_id
+}) => {
+  if (!Array.isArray(medios) || medios.length === 0) return;
+
+  // Solo medios que sean cheques
+  const chequesMedios = medios.filter((m) =>
+    ['CHEQUE_RECIBIDO', 'CHEQUE_EMITIDO'].includes(m.tipo_origen)
+  );
+  if (chequesMedios.length === 0) return;
+
+  // Si hay exactamente una compra aplicada, la usamos como "principal" para el cheque
+  const compraPrincipalId =
+    Array.isArray(aplicaciones) && aplicaciones.length === 1
+      ? aplicaciones[0].compra_id
+      : null;
+
+  const fechaMov = pago.fecha || new Date();
+
+  for (const m of chequesMedios) {
+    const chequeId = m.cheque_id;
+    if (!chequeId) continue;
+
+    const cheque = await ChequeModel.findByPk(chequeId, { transaction });
+    if (!cheque) {
+      throw new Error(`Cheque ${chequeId} no encontrado para el pago.`);
+    }
+
+    // Si ya está aplicado / anulado / etc, no lo tocamos (evitamos error 409)
+    if (!['registrado', 'en_cartera'].includes(cheque.estado)) {
+      continue;
+    }
+
+    if (cheque.tipo === 'recibido') {
+      // CASO A: Cheque RECIBIDO → endoso a proveedor
+      await ChequeModel.update(
+        {
+          estado: 'aplicado_a_compra',
+          proveedor_id: proveedor_id,
+          // guardamos la compra principal si vino en la request
+          compra_id: compraPrincipalId ?? cheque.compra_id
+        },
+        { where: { id: chequeId }, transaction }
+      );
+
+      await ChequeMovimientoModel.create(
+        {
+          cheque_id: chequeId,
+          tipo_mov: 'aplicacion',
+          fecha_mov: fechaMov,
+          referencia_tipo: 'pago',
+          referencia_id: pago.id, // referenciamos al pago
+          notas: `Endoso a proveedor_id=${proveedor_id} (pago_id=${pago.id})`
+        },
+        { transaction }
+      );
+
+      // Este cheque ya no va a ingresar como depósito a banco → borramos flujo de ingreso proyectado
+      await deleteFlujoCheque({ t: transaction, chequeId });
+    } else if (cheque.tipo === 'emitido') {
+      // CASO B: Cheque EMITIDO → pago con cheque propio
+      const provId = Number(proveedor_id || cheque.proveedor_id || 0);
+      if (!provId) {
+        throw new Error(
+          `proveedor_id faltante para cheque emitido #${cheque.numero}`
+        );
+      }
+
+      await ChequeModel.update(
+        {
+          estado: 'aplicado_a_compra',
+          proveedor_id: provId,
+          compra_id: compraPrincipalId ?? cheque.compra_id
+        },
+        { where: { id: chequeId }, transaction }
+      );
+
+      await ChequeMovimientoModel.create(
+        {
+          cheque_id: chequeId,
+          tipo_mov: 'aplicacion',
+          fecha_mov: fechaMov,
+          referencia_tipo: 'pago',
+          referencia_id: pago.id,
+          notas: `Pago a proveedor_id=${provId} (pago_id=${pago.id})`
+        },
+        { transaction }
+      );
+      // Emitidos no tenían flujo de ingreso → no hay deleteFlujoCheque
+    }
+  }
+
+  // Log “suave” de cheques aplicados (no rompe si falla)
+  try {
+    const chequesIds = chequesMedios
+      .map((m) => m.cheque_id)
+      .filter(Boolean)
+      .join(', ');
+    await registrarLog(
+      req,
+      'cheques',
+      'editar',
+      `aplicó cheques [${chequesIds}] al pago_proveedor #${pago.id} (proveedor_id=${proveedor_id})`,
+      usuario_id
+    );
+  } catch (e) {
+    console.warn('Log cheques aplicados falló:', e.message);
+  }
+};
+
 export const CR_PagoProv_Crear_CTS = async (req, res) => {
   const t = await sequelize.transaction();
   try {
@@ -844,6 +975,20 @@ export const CR_PagoProv_Crear_CTS = async (req, res) => {
       if (cxp) await syncSaldoYEstadoCxP(cxp, t);
     }
 
+    // ==========================
+    // Aplicar cheques usados en este pago al proveedor
+    // (solo si hay medios tipo CHEQUE_*)
+    // ==========================
+    await aplicarChequesDePagoAProveedor({
+      req,
+      pago,
+      medios: mediosToCreate,
+      proveedor_id,
+      aplicaciones,
+      transaction: t,
+      usuario_id
+    });
+    
     const formatCurrency = (monto) =>
       new Intl.NumberFormat('es-AR', {
         style: 'currency',
@@ -1018,6 +1163,7 @@ export const UR_PagoProv_Aplicaciones_CTS = async (req, res) => {
       });
       if (cxp) await syncSaldoYEstadoCxP(cxp, t);
     }
+
 
     const formatCurrency = (monto) =>
       new Intl.NumberFormat('es-AR', {
