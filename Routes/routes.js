@@ -1012,9 +1012,15 @@ import {
   UR_Compra_ActualizarBorrador_CTS, // PUT   /compras/:id
   CR_Compra_Confirmar_CTS, // POST  /compras/:id/confirmar
   CR_Compra_Anular_CTS, // POST  /compras/:id/anular
-  ER_Compra_BorrarBorrador_CTS // DELETE /compras/:id
+  ER_Compra_BorrarBorrador_CTS, // DELETE /compras/:id
+  CR_Compra_DesdeOrden_CTS
 } from '../Controllers/Compras/CTS_TB_Compras.js';
 
+// Generar compra desde Orden de Compra aprobada
+router.post(
+  '/ordenes-compra/:id/generar-compra',
+  CR_Compra_DesdeOrden_CTS
+);
 router.get('/compras', OBRS_Compras_CTS);
 router.get('/compras/:id', OBR_Compra_CTS);
 router.post('/compras', CR_Compra_CrearBorrador_CTS);
@@ -1158,4 +1164,26 @@ router.post(
 // -------------------------
 // MODULO DE COMPRAS FIN - 02-11-2025 Benjamin Orellana
 // -------------------------
+
+import {
+  OBRS_OrdenesCompra_CTS,
+  OBR_OrdenCompra_CTS,
+  CR_OrdenCompra_CrearBorrador_CTS,
+  UR_OrdenCompra_ActualizarBorrador_CTS,
+  ER_OrdenCompra_EliminarBorrador_CTS,
+  ACC_OrdenCompra_CambiarEstado_CTS
+} from '../Controllers/Compras/CTS_TB_OrdenesCompra.js';
+
+router.get('/ordenes-compra', OBRS_OrdenesCompra_CTS);
+
+router.get('/ordenes-compra/:id', OBR_OrdenCompra_CTS);
+
+router.post('/ordenes-compra', CR_OrdenCompra_CrearBorrador_CTS);
+
+router.put('/ordenes-compra/:id', UR_OrdenCompra_ActualizarBorrador_CTS);
+
+router.delete('/ordenes-compra/:id', ER_OrdenCompra_EliminarBorrador_CTS);
+
+router.patch('/ordenes-compra/:id/estado', ACC_OrdenCompra_CambiarEstado_CTS);
+
 export default router;

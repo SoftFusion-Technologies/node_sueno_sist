@@ -34,6 +34,12 @@ import { BancoCuentaModel } from '../Bancos/MD_TB_BancoCuentas.js';
 import { ChequeModel } from '../Cheques/MD_TB_Cheques.js';
 import { MovimientosCajaModel } from '../Ventas/MD_TB_MovimientosCaja.js';
 import { UserModel } from '../MD_TB_Users.js';
+// ====== MODELOS CORE RELACIONADOS ======
+
+// ====== MODELOS NUEVOS - ORDEN DE COMPRA 24-11-2025 BENJAMIN ORELLANA ======
+import { OrdenCompraModel } from './MD_TB_OrdenesCompra.js';
+import { OrdenCompraDetalleModel } from './MD_TB_OrdenesCompraDetalle.js';
+// ====== MODELOS NUEVOS - ORDEN DE COMPRA 24-11-2025 BENJAMIN ORELLANA ======
 
 // ===================================================
 // COMPRAS ↔ PROVEEDORES / LOCALES
@@ -251,13 +257,24 @@ UserModel.hasMany(StockMovimientoModel, {
   as: 'movimientos_stock'
 });
 
-// ===================================================
-// (Opcional) SCOPES SUGERIDOS
-// ===================================================
-// // Compras confirmadas con CxP e impuestos
-// CompraModel.addScope('conFinanzas', {
-//   include: [
-//     { model: CxpProveedorModel, as: 'cxp' },
-//     { model: CompraImpuestoModel, as: 'impuestos' }
-//   ]
-// });
+// ====== MODELOS NUEVOS - ORDEN DE COMPRA 24-11-2025 BENJAMIN ORELLANA ======
+OrdenCompraModel.belongsTo(ProveedoresModel, {
+  as: 'proveedor',
+  foreignKey: 'proveedor_id'
+});
+
+OrdenCompraModel.belongsTo(LocalesModel, {
+  as: 'local',
+  foreignKey: 'local_id'
+});
+
+OrdenCompraModel.hasMany(OrdenCompraDetalleModel, {
+  as: 'detalles',
+  foreignKey: 'orden_compra_id'
+});
+
+OrdenCompraDetalleModel.belongsTo(OrdenCompraModel, {
+  as: 'orden',
+  foreignKey: 'orden_compra_id'
+});
+// ====== MODELOS NUEVOS - ORDEN DE COMPRA 24-11-2025 BENJAMIN ORELLANA ======

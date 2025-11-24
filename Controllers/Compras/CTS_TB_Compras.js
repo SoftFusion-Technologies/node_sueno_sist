@@ -42,6 +42,9 @@ import { onCompraConfirmada_Proveedor } from '../../Models/Proveedores/relacione
 // Logs helper
 import { registrarLog } from '../../Helpers/registrarLog.js';
 
+import { OrdenCompraModel } from '../../Models/Compras/MD_TB_OrdenesCompra.js';
+import { OrdenCompraDetalleModel } from '../../Models/Compras/MD_TB_OrdenesCompraDetalle.js';
+
 const toNum = (v, def = 0) => {
   const n = Number(v);
   return Number.isFinite(n) ? n : def;
@@ -818,19 +821,21 @@ export const UR_Compra_ActualizarBorrador_CTS = async (req, res) => {
 };
 
 /* ------------------------------------------------------
- * Confirmar compra (impacta CxP + StockMovimientos + opcional Stock + proyección Teso)
+ * Confirmar compra (impacta CxP + StockMovimientos + opcional Stock + TesoFlujo)
  * ------------------------------------------------------ */
 export const CR_Compra_Confirmar_CTS = async (req, res) => {
   const t = await sequelize.transaction();
   try {
-    const usuario_id = getUsuarioId(req); // <-- en vez de req.user?.id
+    const usuario_id = getUsuarioId(req);
     const { id } = req.params;
 
-    // override destino de stock (opcional)
+    // override destino de stock (opcional, según lo que mande el front)
     const {
       lugar_id = null,
       estado_id = null,
-      local_id: localOverride = null
+      local_id: localOverride = null,
+      localDestinoId = null,
+      localDestino_id = null
     } = req.body || {};
 
     const compra = await CompraModel.findByPk(id, {
@@ -842,13 +847,35 @@ export const CR_Compra_Confirmar_CTS = async (req, res) => {
       lock: t.LOCK.UPDATE
     });
 
-    if (!compra)
+    if (!compra) {
+      await t.rollback();
       return res.status(404).json({ ok: false, error: 'Compra no encontrada' });
-    if (compra.estado !== 'borrador')
+    }
+
+    if (compra.estado !== 'borrador') {
+      await t.rollback();
       return res.status(400).json({
         ok: false,
         error: 'Solo se puede confirmar una compra en borrador'
       });
+    }
+
+    // Tomamos prioridad: override de body > local de la compra
+    const overrideLocal =
+      localOverride ?? localDestinoId ?? localDestino_id ?? null;
+
+    const finalLocalId = overrideLocal ?? compra.local_id ?? null;
+
+    // Sin local no tiene sentido confirmar: no sabemos hacia dónde entra el stock
+    if (!finalLocalId) {
+      await t.rollback();
+      return res.status(400).json({
+        ok: false,
+        error:
+          'No se puede confirmar la compra sin un local asociado. ' +
+          'Seleccioná un local en el formulario de confirmación o completá el local en la compra.'
+      });
+    }
 
     // Calcular vencimiento por días de crédito si falta
     if (!compra.fecha_vencimiento && ProveedoresModel) {
@@ -869,6 +896,7 @@ export const CR_Compra_Confirmar_CTS = async (req, res) => {
       transaction: t,
       lock: t.LOCK.UPDATE
     });
+
     if (!cxp) {
       cxp = await CxpProveedorModel.create(
         {
@@ -891,86 +919,81 @@ export const CR_Compra_Confirmar_CTS = async (req, res) => {
     }
 
     // Impacto en StockMovimientos (+ upsert saldo si destino completo)
-    const finalLocalId = localOverride ?? compra.local_id;
+    const movimientos = [];
 
-    let movimientos = [];
-    if (finalLocalId) {
-      for (const d of compra.detalles) {
-        const mov = await StockMovimientoModel.create(
-          {
-            producto_id: d.producto_id,
-            local_id: finalLocalId,
-            lugar_id: lugar_id ?? null,
-            estado_id: estado_id ?? null,
-            tipo: 'COMPRA',
-            delta: Number(d.cantidad) || 0,
-            costo_unit_neto: d.costo_unit_neto,
-            moneda: compra.moneda,
-            ref_tabla: 'compras',
-            ref_id: compra.id,
-            usuario_id,
-            notas: `Compra confirmada: ${compra.tipo_comprobante || 'FA'} ${
-              compra.punto_venta || ''
-            }-${compra.nro_comprobante || ''}`
-          },
-          { transaction: t }
+    for (const d of compra.detalles) {
+      const mov = await StockMovimientoModel.create(
+        {
+          producto_id: d.producto_id,
+          local_id: finalLocalId,
+          lugar_id: lugar_id ?? null,
+          estado_id: estado_id ?? null,
+          tipo: 'COMPRA',
+          delta: Number(d.cantidad) || 0,
+          costo_unit_neto: d.costo_unit_neto,
+          moneda: compra.moneda,
+          ref_tabla: 'compras',
+          ref_id: compra.id,
+          usuario_id,
+          notas: `Compra confirmada: ${compra.tipo_comprobante || 'FA'} ${
+            compra.punto_venta || ''
+          }-${compra.nro_comprobante || ''}`
+        },
+        { transaction: t }
+      );
+      movimientos.push(mov);
+
+      // Upsert en stock solo si tenemos destino completo (local+ lugar + estado)
+      if (
+        StockModel &&
+        d.producto_id &&
+        lugar_id !== null &&
+        estado_id !== null
+      ) {
+        const deltaCant = Number(d.cantidad) || 0;
+
+        // Armamos SKU para esta combinación
+        const sku = await buildSkuForCompraStock(
+          d.producto_id,
+          finalLocalId,
+          lugar_id,
+          estado_id,
+          t
         );
-        movimientos.push(mov);
 
-        // upsert saldo sólo si destino definido (UNIQUE incluye lugar_id, estado_id)
-        // upsert saldo sólo si destino definido (UNIQUE incluye lugar_id, estado_id)
-        if (
-          StockModel &&
-          d.producto_id &&
-          lugar_id !== null &&
-          estado_id !== null
-        ) {
-          const deltaCant = Number(d.cantidad) || 0;
-
-          // 1) Armamos SKU para esta combinación
-          const sku = await buildSkuForCompraStock(
-            d.producto_id,
-            finalLocalId,
-            lugar_id,
-            estado_id,
-            t
-          );
-
-          // 2) Insert / update con SKU
-          await StockModel.sequelize.query(
-            `INSERT INTO stock (
-        producto_id,
-        local_id,
-        lugar_id,
-        estado_id,
-        cantidad,
-        codigo_sku
-     )
-     VALUES (?, ?, ?, ?, ?, ?)
-     ON DUPLICATE KEY UPDATE
-       cantidad   = GREATEST(0, cantidad + VALUES(cantidad)),
-       -- si ya existía registro pero sin SKU, lo completamos ahora
-       codigo_sku = IF(
-         codigo_sku IS NULL OR codigo_sku = '',
-         VALUES(codigo_sku),
-         codigo_sku
-       )`,
-            {
-              replacements: [
-                d.producto_id,
-                finalLocalId,
-                lugar_id,
-                estado_id,
-                deltaCant,
-                sku
-              ],
-              transaction: t
-            }
-          );
-        }
+        await StockModel.sequelize.query(
+          `INSERT INTO stock (
+             producto_id,
+             local_id,
+             lugar_id,
+             estado_id,
+             cantidad,
+             codigo_sku
+           )
+           VALUES (?, ?, ?, ?, ?, ?)
+           ON DUPLICATE KEY UPDATE
+             cantidad   = GREATEST(0, cantidad + VALUES(cantidad)),
+             codigo_sku = IF(
+               codigo_sku IS NULL OR codigo_sku = '',
+               VALUES(codigo_sku),
+               codigo_sku
+             )`,
+          {
+            replacements: [
+              d.producto_id,
+              finalLocalId,
+              lugar_id,
+              estado_id,
+              deltaCant,
+              sku
+            ],
+            transaction: t
+          }
+        );
       }
     }
 
+    // Cambiar estado de la compra
     compra.estado = 'confirmada';
     await compra.save({ transaction: t });
 
@@ -991,7 +1014,6 @@ export const CR_Compra_Confirmar_CTS = async (req, res) => {
         { transaction: t }
       );
 
-      // 🔊 LOG específico de Tesorería
       const tesoLogDesc = [
         'creó proyección de tesorería para compra',
         `CompraID=${compra.id}`,
@@ -1010,6 +1032,7 @@ export const CR_Compra_Confirmar_CTS = async (req, res) => {
       ).catch(() => {});
     }
 
+    // Hook opcional para notificar/procesar algo en proveedor
     try {
       await onCompraConfirmada_Proveedor(compra, { transaction: t });
     } catch (e) {
@@ -1018,6 +1041,7 @@ export const CR_Compra_Confirmar_CTS = async (req, res) => {
         e.message
       );
     }
+
     // ============================
     // LOG DETALLADO DE CONFIRMACIÓN
     // ============================
@@ -1047,11 +1071,9 @@ export const CR_Compra_Confirmar_CTS = async (req, res) => {
       (compra.detalles || []).map((d) => d.producto_id)
     ).size;
 
-    const destinoStock = finalLocalId
-      ? `Local=${finalLocalId}, Lugar=${lugar_id ?? 'S/Lugar'}, Estado=${
-          estado_id ?? 'S/Estado'
-        }`
-      : 'Sin impacto en stock (sin local_id)';
+    const destinoStock = `Local=${finalLocalId}, Lugar=${
+      lugar_id ?? 'S/Lugar'
+    }, Estado=${estado_id ?? 'S/Estado'}`;
 
     const stockMsg = movimientos.length
       ? `StockMovimientos=${movimientos.length}, Unidades=${totalUnidades}, ProductosDistintos=${productosDistintos}, Destino=[${destinoStock}]`
@@ -1075,8 +1097,9 @@ export const CR_Compra_Confirmar_CTS = async (req, res) => {
         'es-AR'
       )}`;
     }
+
     const logDescripcion = [
-      'confirmó la compra', // se concatena con: El usuario "X"
+      'confirmó la compra',
       `ID=${compra.id}`,
       `ProveedorID=${compra.proveedor_id}`,
       `Canal=${compra.canal}`,
@@ -1103,16 +1126,17 @@ export const CR_Compra_Confirmar_CTS = async (req, res) => {
       compra,
       cxp,
       movimientos,
-      aviso: !finalLocalId
-        ? 'No se impactó stock (falta local_id). Se registró solo CxP.'
-        : lugar_id === null || estado_id === null
-        ? 'StockMovimientos creados. Upsert en stock omitido por destino incompleto (lugar/estado).'
-        : undefined
+      aviso:
+        lugar_id === null || estado_id === null
+          ? 'StockMovimientos creados. Upsert en stock omitido por destino incompleto (lugar/estado).'
+          : undefined
     });
   } catch (err) {
     await t.rollback();
     console.error('[CR_Compra_Confirmar_CTS] error:', err);
-    res.status(500).json({ ok: false, error: 'Error confirmando compra' });
+    return res
+      .status(500)
+      .json({ ok: false, error: 'Error confirmando compra' });
   }
 };
 
@@ -1396,6 +1420,387 @@ export const ER_Compra_BorrarBorrador_CTS = async (req, res) => {
   }
 };
 
+/*
+ * Crear una COMPRA BORRADOR a partir de una ORDEN DE COMPRA APROBADA.
+ *
+ * Endpoint sugerido:
+ *   POST /ordenes-compra/:id/generar-compra
+ *
+ * Body opcional:
+ * {
+ *   canal,                // si no, usa orden.canal
+ *   local_id,             // si no, usa orden.local_id
+ *   fecha,                // si no, new Date()
+ *   fecha_vencimiento,    // REQUERIDA si condicion_compra = CC / crédito
+ *   condicion_compra,     // si no, usa orden.condicion_compra
+ *   moneda,               // si no, usa orden.moneda
+ *   tipo_comprobante,     // si no, 'FA'
+ *   punto_venta,          // string o número, se normaliza (máx 4 dígitos)
+ *   nro_comprobante,      // string o número, se normaliza (máx 13 dígitos)
+ *   observaciones,
+ *   impuestos: [          // opcional; se usa para compras_impuestos
+ *     { tipo, codigo, base, alicuota, monto }
+ *   ]
+ * }
+ *
+ * NOTA:
+ * - La compra queda en estado 'borrador'.
+ * - NO impacta stock_movimientos ni CxP todavía (eso lo hace tu confirmación).
+ * - La OC pasa de 'aprobada' -> 'cerrada' en esta misma transacción.
+ */
+
+export const CR_Compra_DesdeOrden_CTS = async (req, res) => {
+  const t = await sequelize.transaction();
+  try {
+    const usuario_id = getUsuarioId(req);
+    const { id: ordenId } = req.params;
+
+    const {
+      canal,
+      local_id,
+      fecha,
+      fecha_vencimiento,
+      condicion_compra,
+      moneda,
+      tipo_comprobante,
+      punto_venta,
+      nro_comprobante,
+      observaciones,
+      impuestos = []
+    } = req.body || {};
+
+    // 1) Buscar la Orden de Compra con sus detalles
+    const orden = await OrdenCompraModel.findByPk(ordenId, {
+      include: [
+        {
+          model: OrdenCompraDetalleModel,
+          as: 'detalles'
+        }
+      ],
+      transaction: t,
+      lock: t.LOCK.UPDATE
+    });
+
+    if (!orden) {
+      await t.rollback();
+      return res
+        .status(404)
+        .json({ ok: false, error: 'Orden de compra no encontrada' });
+    }
+
+    if (orden.estado !== 'aprobada') {
+      await t.rollback();
+      return res.status(400).json({
+        ok: false,
+        error:
+          'Solo se puede generar una compra desde una Orden de Compra APROBADA'
+      });
+    }
+
+    if (!orden.detalles || !orden.detalles.length) {
+      await t.rollback();
+      return res.status(400).json({
+        ok: false,
+        error: 'La Orden de Compra no tiene detalles para generar la compra'
+      });
+    }
+
+    // 2) Mapeo de detalles de OC -> detalles de compra
+    const detallesCompra = orden.detalles.map((d) => ({
+      // FKs
+      producto_id: d.producto_id ?? null,
+      producto_proveedor_id: null, // si luego querés, acá se puede mapear al producto_proveedor
+      descripcion: d.descripcion ?? null,
+
+      // Cantidad
+      cantidad: d.cantidad,
+
+      // Tomamos los valores "estimados" como base para la compra borrador
+      costo_unit_neto:
+        d.costo_unit_estimado != null
+          ? Number(d.costo_unit_estimado)
+          : Number(d.costo_unit_neto ?? 0),
+
+      alicuota_iva:
+        d.alicuota_iva_estimado != null
+          ? Number(d.alicuota_iva_estimado)
+          : Number(d.alicuota_iva ?? 21),
+
+      inc_iva:
+        d.inc_iva_estimado != null
+          ? Number(d.inc_iva_estimado)
+          : Number(d.inc_iva ?? 0),
+
+      descuento_porcentaje: Number(d.descuento_porcentaje ?? 0),
+
+      otros_impuestos:
+        d.otros_impuestos_estimados != null
+          ? Number(d.otros_impuestos_estimados)
+          : Number(d.otros_impuestos ?? 0),
+
+      total_linea: 0 // se setea en recomputarTotales
+    }));
+
+    if (!detallesCompra.length) {
+      await t.rollback();
+      return res.status(400).json({
+        ok: false,
+        error: 'No se pudo construir el detalle de compra a partir de la Orden'
+      });
+    }
+
+    // 3) Normalizar punto_venta (igual lógica que en CR_Compra_CrearBorrador_CTS)
+    let pv = null;
+    if (
+      punto_venta !== null &&
+      punto_venta !== undefined &&
+      String(punto_venta).trim() !== ''
+    ) {
+      const rawPv = String(punto_venta).replace(/\D/g, '');
+      if (rawPv.length === 0) {
+        pv = null;
+      } else if (rawPv.length > 4) {
+        await t.rollback();
+
+        console.warn(
+          '[CR_Compra_DesdeOrden_CTS] Punto de venta fuera de rango',
+          {
+            valor_recibido: punto_venta,
+            rawPv,
+            orden_compra_id: orden.id,
+            proveedor_id: orden.proveedor_id,
+            tipo_comprobante: tipo_comprobante ?? 'FA'
+          }
+        );
+
+        return res.status(400).json({
+          ok: false,
+          error: 'Punto de venta inválido.',
+          detalle:
+            'El punto de venta debe tener como máximo 4 dígitos (por ejemplo 1, 12, 101, 1200).',
+          valor_recibido: punto_venta
+        });
+      } else {
+        pv = Number(rawPv);
+      }
+    }
+
+    // 4) Normalizar nro_comprobante
+    let nro = null;
+    if (
+      nro_comprobante !== null &&
+      nro_comprobante !== undefined &&
+      String(nro_comprobante).trim() !== ''
+    ) {
+      const rawNro = String(nro_comprobante).replace(/\D/g, '');
+      if (rawNro.length === 0) {
+        nro = null;
+      } else if (rawNro.length > 13) {
+        await t.rollback();
+
+        console.warn(
+          '[CR_Compra_DesdeOrden_CTS] Número de comprobante fuera de rango',
+          {
+            valor_recibido: nro_comprobante,
+            rawNro,
+            orden_compra_id: orden.id,
+            proveedor_id: orden.proveedor_id,
+            tipo_comprobante: tipo_comprobante ?? 'FA'
+          }
+        );
+
+        return res.status(400).json({
+          ok: false,
+          error: 'Número de comprobante inválido.',
+          detalle: 'El número de comprobante es demasiado largo.',
+          valor_recibido: nro_comprobante
+        });
+      } else {
+        nro = Number(rawNro);
+      }
+    }
+
+    // 5) Determinar condición y vencimiento
+    const condicionFinal =
+      condicion_compra ?? orden.condicion_compra ?? 'cuenta_corriente';
+
+    let fechaVtoFinal =
+      fecha_vencimiento ??
+      orden.fecha_estimada_entrega /* placeholder */ ??
+      null;
+
+    if (
+      (condicionFinal === 'cuenta_corriente' || condicionFinal === 'credito') &&
+      !fechaVtoFinal
+    ) {
+      await t.rollback();
+      return res.status(400).json({
+        ok: false,
+        error:
+          'fecha_vencimiento es requerida cuando la condición de compra es cuenta_corriente o crédito.'
+      });
+    }
+
+    // 6) Recalcular totales usando la lógica central de compras
+    const tot = recomputarTotales(detallesCompra, impuestos);
+
+    // 7) Crear la compra BORRADOR
+    const compra = await CompraModel.create(
+      {
+        canal: canal ?? orden.canal ?? 'C1',
+        proveedor_id: orden.proveedor_id,
+        local_id: local_id ?? orden.local_id ?? null,
+        fecha: fecha ?? new Date(),
+        condicion_compra: condicionFinal,
+        fecha_vencimiento: fechaVtoFinal,
+        moneda: moneda ?? orden.moneda ?? 'ARS',
+        tipo_comprobante: tipo_comprobante ?? 'FA',
+        punto_venta: pv,
+        nro_comprobante: nro,
+        subtotal_neto: tot.subtotal_neto,
+        iva_total: tot.iva_total,
+        percepciones_total: tot.percepciones_total,
+        retenciones_total: tot.retenciones_total,
+        total: tot.total,
+        observaciones: observaciones ?? orden.observaciones,
+        estado: 'borrador',
+        created_by: usuario_id
+        // Si más adelante agregás columna orden_compra_id en `compras`,
+        // acá podés setearla: orden_compra_id: orden.id
+      },
+      { transaction: t }
+    );
+
+    // 8) Crear detalles de compra
+    for (const d of detallesCompra) {
+      d.compra_id = compra.id;
+    }
+
+    await CompraDetalleModel.bulkCreate(detallesCompra, {
+      transaction: t
+    });
+
+    // 9) Crear impuestos de compra (si vienen)
+    if (Array.isArray(impuestos) && impuestos.length) {
+      const impuestosConCompra = impuestos.map((imp) => ({
+        ...imp,
+        compra_id: compra.id
+      }));
+
+      await CompraImpuestoModel.bulkCreate(impuestosConCompra, {
+        transaction: t
+      });
+    }
+
+    // 10) Cambiar estado de la Orden a CERRADA (ya se usó para generar compra)
+    const estadoAnterior = orden.estado;
+    orden.estado = 'cerrada';
+    orden.updated_by = usuario_id;
+    await orden.save({ transaction: t });
+
+    // 11) Logs
+    const formatCurrency = (monto) =>
+      new Intl.NumberFormat('es-AR', {
+        style: 'currency',
+        currency: moneda || 'ARS',
+        minimumFractionDigits: 2
+      }).format(Number(monto || 0));
+
+    const pvLog =
+      pv != null && pv !== undefined ? String(pv).padStart(4, '0') : 'S/PV';
+
+    const nroLog =
+      nro != null && nro !== undefined ? String(nro).padStart(8, '0') : 'S/NRO';
+
+    const logCompra = [
+      'generó una COMPRA desde ORDEN DE COMPRA',
+      `OC_ID=${orden.id}`,
+      `Compra_ID=${compra.id}`,
+      `ProveedorID=${orden.proveedor_id}`,
+      `Comprobante=${compra.tipo_comprobante} ${pvLog}-${nroLog}`,
+      `Total=${formatCurrency(tot.total)}`
+    ].join(' | ');
+
+    await registrarLog(
+      req,
+      'compras',
+      'crear_desde_oc',
+      logCompra,
+      usuario_id
+    ).catch(() => {});
+
+    const logOC = [
+      'cerró una ORDEN DE COMPRA luego de generar la compra',
+      `OC_ID=${orden.id}`,
+      `Compra_ID=${compra.id}`,
+      `EstadoAnterior=${estadoAnterior}`,
+      `EstadoNuevo=${orden.estado}`
+    ].join(' | ');
+
+    await registrarLog(
+      req,
+      'ordenes_compra',
+      'cambiar_estado',
+      logOC,
+      usuario_id
+    ).catch(() => {});
+
+    await t.commit();
+    return res.json({
+      ok: true,
+      compra,
+      orden_actualizada: orden
+    });
+  } catch (err) {
+    if (!t.finished) {
+      await t.rollback();
+    }
+
+    // Errores de validación de Sequelize (incluye validaciones del modelo CompraModel)
+    if (err.name === 'SequelizeValidationError') {
+      const detalles = err.errors?.map((e) => ({
+        campo: e.path,
+        mensaje: e.message,
+        valor: e.value
+      }));
+
+      console.warn(
+        '[CR_Compra_DesdeOrden_CTS] Validación de compra:',
+        JSON.stringify(detalles)
+      );
+
+      return res.status(400).json({
+        ok: false,
+        error: 'Validación de datos de la compra generada desde OC.',
+        detalles,
+        sugerencia:
+          'Revisá los campos marcados (condición de compra, vencimiento, importes, etc.).'
+      });
+    }
+
+    // Unique doc proveedor + tipo_comprobante + punto_venta + nro_comprobante
+    if (err?.original?.code === 'ER_DUP_ENTRY') {
+      console.warn(
+        '[CR_Compra_DesdeOrden_CTS] Documento duplicado:',
+        err?.original?.sqlMessage
+      );
+      return res.status(409).json({
+        ok: false,
+        error:
+          'Documento de compra duplicado para ese proveedor (tipo/pv/nro).',
+        sugerencia:
+          'Revisá que el tipo, punto de venta y número no estén ya cargados para este proveedor.'
+      });
+    }
+
+    console.error('[CR_Compra_DesdeOrden_CTS] Error inesperado:', err);
+    return res.status(500).json({
+      ok: false,
+      error: 'Error generando compra desde Orden de Compra.'
+    });
+  }
+};
+
 /* ------------------------------------------------------
  * Export
  * ------------------------------------------------------ */
@@ -1406,5 +1811,6 @@ export default {
   UR_Compra_ActualizarBorrador_CTS,
   CR_Compra_Confirmar_CTS,
   CR_Compra_Anular_CTS,
-  ER_Compra_BorrarBorrador_CTS
+  ER_Compra_BorrarBorrador_CTS,
+  CR_Compra_DesdeOrden_CTS
 };
