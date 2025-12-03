@@ -11,10 +11,12 @@
  */
 
 // Importar el modelo
+// CTS_TB_MediosPago.js
+
 import MD_TB_MediosPago from '../../Models/Ventas/MD_TB_MediosPago.js';
 const MediosPagoModel = MD_TB_MediosPago.MediosPagoModel;
 
-// Obtener todos los medios de pago
+// === LISTAR TODOS ===
 export const OBRS_MediosPago_CTS = async (req, res) => {
   try {
     const medios = await MediosPagoModel.findAll({
@@ -29,7 +31,7 @@ export const OBRS_MediosPago_CTS = async (req, res) => {
   }
 };
 
-// Obtener un solo medio de pago por ID
+// === OBTENER UNO ===
 export const OBR_MedioPago_CTS = async (req, res) => {
   try {
     const medio = await MediosPagoModel.findByPk(req.params.id);
@@ -44,9 +46,9 @@ export const OBR_MedioPago_CTS = async (req, res) => {
   }
 };
 
-// Crear un nuevo medio de pago
+// === CREAR ===
 export const CR_MedioPago_CTS = async (req, res) => {
-  const { nombre, descripcion, icono, orden, ajuste_porcentual } = req.body;
+  const { nombre, descripcion, icono, orden, ajuste_porcentual, activo } = req.body;
 
   if (!nombre) {
     return res
@@ -60,7 +62,9 @@ export const CR_MedioPago_CTS = async (req, res) => {
       descripcion: descripcion || '',
       icono: icono || '',
       orden: orden || 0,
-      ajuste_porcentual: ajuste_porcentual || 0
+      ajuste_porcentual: ajuste_porcentual || 0,
+      // importante para que respete el toggle del front
+      activo: typeof activo === 'number' ? activo : 1
     });
 
     res.json({ message: 'Medio de pago creado correctamente', medio: nuevo });
@@ -69,12 +73,11 @@ export const CR_MedioPago_CTS = async (req, res) => {
   }
 };
 
-// Eliminar un medio de pago
+// === ELIMINAR ===
 export const ER_MedioPago_CTS = async (req, res) => {
   const { id } = req.params;
 
   try {
-    // Aquí podrías controlar si hay ventas asociadas a este medio antes de eliminar
     const eliminado = await MediosPagoModel.destroy({ where: { id } });
 
     if (!eliminado) {
@@ -83,16 +86,28 @@ export const ER_MedioPago_CTS = async (req, res) => {
         .json({ mensajeError: 'Medio de pago no encontrado' });
     }
 
-    res.json({ message: 'Medio de pago eliminado correctamente.' });
+    return res.json({ message: 'Medio de pago eliminado correctamente.' });
   } catch (error) {
-    res.status(500).json({
-      mensajeError: 'Error del servidor',
+    // Caso típico de FK: hay ventas asociadas
+    const code = error?.original?.code || error?.parent?.code;
+    const errno = error?.original?.errno || error?.parent?.errno;
+
+    if (code === 'ER_ROW_IS_REFERENCED_2' || errno === 1451) {
+      return res.status(409).json({
+        mensajeError:
+          'No se puede eliminar este medio de pago porque tiene ventas asociadas. ' +
+          'En su lugar puedes marcarlo como INACTIVO para que no pueda seguir utilizándose.'
+      });
+    }
+
+    return res.status(500).json({
+      mensajeError: 'Error del servidor al eliminar el medio de pago.',
       detalle: error.message
     });
   }
 };
 
-// Actualizar un medio de pago
+// === ACTUALIZAR ===
 export const UR_MedioPago_CTS = async (req, res) => {
   const { id } = req.params;
 
